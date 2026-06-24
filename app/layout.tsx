@@ -1,19 +1,20 @@
 import "../global.css";
-import { Inter } from "@next/font/google";
+import { Inter } from "next/font/google";
 import LocalFont from "@next/font/local";
 import { Metadata } from "next";
 import { Analytics } from "./components/analytics";
+import PanelShell from "./components/panel-shell";
 
 export const metadata: Metadata = {
   title: {
-    default: "chronark.com",
+    default: "furr_",
     template: "%s | chronark.com",
   },
-  description: "Co-founder of unkey.dev and founder of planetfall.io",
+  description: "",
   openGraph: {
-    title: "chronark.com",
+    title: "furr_",
     description:
-      "Co-founder of unkey.dev and founder of planetfall.io",
+      "",
     url: "https://chronark.com",
     siteName: "chronark.com",
     images: [
@@ -66,10 +67,11 @@ export default function RootLayout({
         <Analytics />
       </head>
       <body
-        className={`bg-black ${process.env.NODE_ENV === "development" ? "debug-screens" : undefined
-          }`}
+        className={process.env.NODE_ENV === "development" ? "debug-screens" : undefined}
+        style={{ background: "#252323", margin: 0, overflow: "hidden" }}
       >
         {children}
+        <PanelShell />
       </body>
     </html>
   );
