@@ -81,7 +81,7 @@ function ContentAbout() {
     <div style={{ padding: "3rem 2rem 1.5rem", display: "flex", flexDirection: "column", alignItems: "center", gap: "1.25rem", width: "100%" }}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "1.25rem", width: "100%" }}>
       <img
-        src="/profile.jpg"
+        src="/images/kitr.png"
         alt="Profile"
         style={{
           width: 96, height: 96, minWidth: 96, minHeight: 96,
@@ -315,8 +315,8 @@ export default function PanelTest() {
   const isMobile          = useIsMobile();
   const isLandscapeMobile = useIsLandscapeMobile();
 
-  const isOnLeft   = pathname?.startsWith("/left") ?? false;
-  const activeSlug = pathname?.startsWith("/left/") ? pathname.slice("/left/".length) : null;
+  const isOnLeft   = pathname?.startsWith("/project") ?? false;
+  const activeSlug = pathname?.startsWith("/project/") ? pathname.slice("/project/".length) : null;
 
   const category = isOnLeft ? "left" : "about";
   const [visibleCategory, setVisibleCategory] = useState(category);
@@ -389,7 +389,7 @@ export default function PanelTest() {
             key={visibleSlug}
             style={{ animation: "content-slide-in 0.25s ease-out both", width: "100%", display: "flex", flexDirection: "column", gap: "1.25rem" }}
           >
-            {visibleSlug && <ContentDetail slug={visibleSlug} onBack={() => router.push("/left")} />}
+            {visibleSlug && <ContentDetail slug={visibleSlug} onBack={() => router.push("/project")} />}
           </div>
         </div>
       </div>
@@ -447,7 +447,7 @@ export default function PanelTest() {
                 style={{ animation: "content-slide-in 0.25s ease-out both", width: "100%", display: "flex", flexDirection: "column" }}
               >
                 {visibleCategory === "left"
-                  ? <ContentLeft activeSlug={activeSlug} onSelect={(slug) => router.push(`/left/${slug}`)} />
+                  ? <ContentLeft activeSlug={activeSlug} onSelect={(slug) => router.push(`/project/${slug}`)} />
                   : <ContentAbout />
                 }
               </div>
@@ -461,7 +461,7 @@ export default function PanelTest() {
         {/* Full-width bottom button */}
         <div style={{ flexShrink: 0, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
           <button
-            onClick={() => router.push(isOnLeft ? "/about" : "/left")}
+            onClick={() => router.push(isOnLeft ? "/about" : "/project")}
             style={{
               display: "flex",
               alignItems: "center",

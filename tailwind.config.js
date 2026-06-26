@@ -29,7 +29,7 @@ module.exports = {
 				},
 			},
 			fontFamily: {
-				sans: ["var(--font-inter)", ...defaultTheme.fontFamily.sans],
+				// sans: ["var(--font-calsans)", ...defaultTheme.fontFamily.sans],
 				display: ["var(--font-calsans)"],
 				jersey: ["Jersey 10", "sans-serif"],
 			},

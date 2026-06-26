@@ -8,22 +8,22 @@ import PanelShell from "./components/panel-shell";
 export const metadata: Metadata = {
   title: {
     default: "furr_",
-    template: "%s | chronark.com",
+    template: "%s | furr_.com",
   },
   description: "",
   openGraph: {
     title: "furr_",
     description:
       "",
-    url: "https://chronark.com",
-    siteName: "chronark.com",
-    images: [
-      {
-        url: "https://chronark.com/og.png",
-        width: 1920,
-        height: 1080,
-      },
-    ],
+    url: "https://furrunderscore.vercel.app",
+    siteName: "https://furrunderscore.vercel.app",
+    // images: [
+    //   {
+    //     url: "https://chronark.com/og.png",
+    //     width: 1920,
+    //     height: 1080,
+    //   },
+    // ],
     locale: "en-US",
     type: "website",
   },
@@ -38,12 +38,12 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
-  twitter: {
-    title: "Chronark",
-    card: "summary_large_image",
-  },
+  // twitter: {
+  //   title: "Chronark",
+  //   card: "summary_large_image",
+  // },
   icons: {
-    shortcut: "/favicon.png",
+    shortcut: "/images/kitr.png",
   },
 };
 const inter = Inter({
@@ -52,7 +52,7 @@ const inter = Inter({
 });
 
 const calSans = LocalFont({
-  src: "../public/fonts/CalSans-SemiBold.ttf",
+  src: "../public/fonts/Jersey10-Regular.ttf",
   variable: "--font-calsans",
 });
 
