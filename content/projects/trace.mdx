@@ -1,0 +1,604 @@
+---
+title: "Quake Raytracing"
+description: A Raytracing experiment using a BSP tree as a collision detection medium
+published: true
+tags:
+  - Graphics
+  - Godot
+
+---
+
+While working on my game **Surging Blood**, I ran into performance issues, slow level iteration, and persistent collision problems. One avenue I explored was how Quake handled the same challenges.
+
+Quake uses a brush system that takes planes, calculates their intersections, and generates the vertices used to render faces.
+
+<figure className="img-400">
+  <img className="w-full rounded-md border border-zinc-200" src="https://quakewiki.org/w/images/b/bc/Brush.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">A brush — <a href="https://quakewiki.org/wiki/Brush">Quake wiki</a></figcaption>
+</figure>
+
+At first glance this doesn't seem that different from the meshes we use today — and in some ways it's actually more restrictive, since you have to compute intersections explicitly and concave shapes are impossible in a single brush (holes are made with multiple brushes).
+
+<figure className="img-600">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_hole.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">A hole made with multiple brushes</figcaption>
+</figure>
+
+What interested me most, though, wasn't the rendering — it was the collision system, which uses a <New>BSP tree</New>.
+
+<New>BSP</New> stands for <New>Binary Space Partitioning</New>. It subdivides a space into two sets by using 3D planes (also known as hyperplanes).
+
+You might wonder what the advantage of this is over existing algorithms.
+
+On modern systems, if you just want to ship a game without reinventing the wheel, you probably don't need it.
+
+On the other hand, if you want an extremely lightweight collision system, BSP can deliver the same results with far less CPU overhead — it was designed to run on hardware much older than what we have today.
+
+---
+
+For now, we won't build a full collision system. Instead, we'll explore <New>BSP traversal</New> and raytracing through the tree.
+
+I'll be using this map I built in [Trenchbroom](https://trenchbroom.github.io/):
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_map.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">A closed room inspired by <a href="https://www.youtube.com/watch?v=KyhrqbfEgfA">jdh</a></figcaption>
+</figure>
+
+I won't cover the map parsing and rendering pipeline here — it follows the same approach as my [Minecraft Neon article](). I also tend to use modified Godot builds; in this one I've stripped out all built-in 3D rendering, so everything you see was rendered using the <Ref>RenderingDevice</Ref> directly.
+
+Instead, I'll focus on the BSP generation, recursive traversal, and the compute shader I used for raytracing.
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_result.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The final result</figcaption>
+</figure>
+
+---
+
+### Building the BSP
+
+First, how is a BSP built? I won't follow Quake's exact approach — even after reading the source code multiple times, I couldn't get it to produce correct results on my end. And honestly, you don't need the code to understand how it works.
+
+I'll use a 2D top-down view of a simplified map for clarity.
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp0.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The map to be parsed</figcaption>
+</figure>
+
+We have simple geometry with <New>axis-aligned walls</New> as well as diagonal walls.
+
+Each node in the tree represents a plane that splits the level, creating two children: one for the front side and one for the back side.
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp1.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">A single split</figcaption>
+</figure>
+
+Each split produces a sub-region that either contains one type of space (empty or solid), or a mix of both.
+
+How do we know when to stop splitting? When we split the level, we also split the geometry, generating new planes along the cut. After a split, if one side contains no more planes, we know that region is uniform — it's either entirely empty or entirely solid.
+
+The algorithm splits the level, then recursively splits each child that still contains mixed regions, until every leaf contains exactly one region type.
+
+If that's still unclear, the example below should make it visual.
+
+> Quake requires the level to be fully closed and to contain a spawn point. This lets it run a process called **flooding**, which identifies solid and empty regions and determines which faces are potentially visible.
+
+---
+
+### Selecting the cutting plane
+
+The core of the algorithm is choosing which plane to split on. We could pick a random plane, but that would be extremely inefficient. We could use only <New>axis-aligned planes</New>, but in our case that would leave regions where it's ambiguous whether a point is inside a wall or not.
+
+Quake's approach is to pick planes directly from the level geometry itself.
+
+> Quake also pre-processes the level by splitting it into chunks before the BSP pass, but that isn't important for this explanation.
+
+Even using level planes, there's still the question of which one to pick. Any plane will eventually partition the level completely, but a bad choice leads to many unnecessary splits and a deeply unbalanced tree.
+
+A <New>balanced tree</New> — one with few levels below the root — requires picking planes that divide the remaining geometry roughly evenly on both sides. This is a hard problem with no universally correct answer.
+
+Quake uses a scoring system that favors planes that don't split too many other geometry pieces and are preferably <Ref>axis-aligned</Ref>.
+
+After selecting the best-scoring plane, it splits the level, cuts any intersecting geometry, and recurses.
+
+---
+
+### An example
+
+Following this process on our test map:
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp2.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">First split</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp3.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Recursively splitting each child</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp4.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Distinct regions beginning to emerge</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp5.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Both children are split by the same plane — an unavoidable consequence of the first split</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp6.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">One last split</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp7.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Done — every leaf contains a single region type</figcaption>
+</figure>
+
+> Outward-facing faces were excluded here but would normally be processed.
+
+---
+
+### Traversal
+
+With the tree built, we can now use it. A <Ref>BSP tree</Ref> lets us determine whether any point lies in an empty or solid region: we simply test which side of each splitting plane the point is on, following children until we reach a leaf.
+
+We can extend this to a ray and perform raycasting through the entire level.
+
+Here's a ray cast through our example map:
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_bsp9.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">A ray through the level</figcaption>
+</figure>
+
+At each node we test the ray against the splitting plane. There are two situations:
+- The start and end points lie on the same side — we follow only that child.
+- The start and end points lie on opposite sides — we compute the intersection and process the near side first.
+
+> When testing which side a point is on, there is a case where the point lies exactly *on* the plane. Handle this carefully.
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray1.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The ray crosses the plane — we compute the intersection and recurse into the near side</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray2.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Both points now lie on the same side — we follow that child directly</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray3.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray4.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray5.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray6.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">We've reached an empty leaf — no collision. We unwind the recursion back to the last split.</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray7.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Another crossing found — we continue</figcaption>
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray8.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray9.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray10.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray11.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray12.png" alt="" />
+</figure>
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_ray13.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">We reach a solid leaf — collision detected</figcaption>
+</figure>
+
+---
+
+### Computing the raycast
+
+Now that we understand BSP traversal, let's write a compute shader to raycast into the scene.
+
+We need a <New>SSBO</New> (Shader Storage Buffer Object) for our lights and one for the BSP data:
+
+```glsl
+struct Light {
+    vec3 pos;
+    vec3 color;
+};
+
+layout(binding = 1, std430) readonly buffer lightData {
+    uint light_count;
+    Light lights[];
+};
+
+struct BspNode {
+    vec4 plane;
+    uint type;
+    uint front;
+    uint back;
+    uint content;
+    uint plane_idx;
+};
+
+layout(binding = 2, std430) readonly buffer geometryData {
+    BspNode nodes[];
+};
+```
+
+There's probably a more compact way to store the <Ref>BSP</Ref> — right now we waste data because a leaf only uses the `content` field — but this is sufficient for now.
+
+There's also an important constraint: recursive algorithms run poorly on the GPU. The CPU and GPU are fundamentally different architectures, so we need an <New>iterative algorithm</New> instead.
+
+I used a stack-based approach inspired by [Ray Tracing with the BSP Tree in Graphics Gems III by Kelvin Sung & Peter Shirley](http://www0.cs.ucl.ac.uk/research/vr/Projects/VLF/vlfpapers/tracing/sung__ray_tracing_with_BSP_tree.pdf):
+
+```glsl
+float plane_distance(vec4 plane, vec3 v) {
+    return dot(plane.xyz, v) - plane.w;
+}
+
+const float EPSILON = 1e-5;
+const uint STACK_LIMIT = 128;
+
+struct StackEntry {
+    uint node;
+    uint split;
+    float mi;
+    float ma;
+};
+
+bool raycast(vec3 from, vec3 to, uint plane_idx) {
+    const vec3 dir = normalize(to - from);
+
+    const float MAX_SCENE = distance(from, to) - 0.005;
+
+    float mi = 0.0;
+    float ma = MAX_SCENE;
+
+    StackEntry stack[STACK_LIMIT];
+    uint stack_ptr = 1;
+
+    uint idx = 0;
+
+    uint split_idx = 0;
+
+    BspNode node = nodes[0];
+
+    while (true) {
+        while (node.content == 0xffffffff) {
+            float num = 0.0;
+            float denom = dot(node.plane.xyz, dir);
+
+            if (node.type < 3) {
+                num = from[node.type] - node.plane.w;
+            } else {
+                num = dot(node.plane.xyz, from) - node.plane.w;
+            }
+
+            uint near = 0;
+            uint far = 0;
+
+            if (abs(num) <= EPSILON) {
+                if (denom >= 0.0) {
+                    near = node.front;
+                    far = node.back;
+                } else {
+                    near = node.back;
+                    far = node.front;
+                }
+            } else if (num > 0.0) {
+                near = node.front;
+                far = node.back;
+            } else {
+                near = node.back;
+                far = node.front;
+            }
+
+            if (abs(denom) <= EPSILON) {
+                // Is perpendicular
+                if (abs(num) <= EPSILON) {
+                    // Is on the plane
+                    split_idx = node.plane_idx;
+
+                    if (stack_ptr < STACK_LIMIT) {
+                        stack[stack_ptr] = StackEntry(far, split_idx, mi, ma);
+                        stack_ptr++;
+                    }
+                }
+                idx = near;
+            } else {
+                float split = -(num / denom);
+
+                if (abs(split) <= EPSILON) {
+                    split = abs(split);
+                }
+
+                if ((split >= ma) || (split <= 0.0)) {
+                    idx = near;
+                } else if (split <= mi) {
+                    idx = far;
+                } else {
+                    split_idx = node.plane_idx;
+
+                    if (stack_ptr < STACK_LIMIT) {
+                        stack[stack_ptr] = StackEntry(far, split_idx, split, ma);
+                        stack_ptr++;
+                    }
+                    idx = near;
+                    ma = split;
+                }
+            }
+
+            node = nodes[idx];
+        }
+
+        if (node.content == 1) {
+            return split_idx != plane_idx;
+        }
+
+        if (stack_ptr > 0) {
+            stack_ptr--;
+            const StackEntry entry = stack[stack_ptr];
+
+            idx = entry.node;
+            mi = entry.mi;
+            ma = entry.ma;
+            split_idx = entry.split;
+
+            node = nodes[idx];
+        } else {
+            break;
+        }
+    }
+
+    return false;
+}
+```
+
+Let's walk through the key parts.
+
+First we collect basic ray information — direction and maximum travel distance:
+
+```glsl
+const vec3 dir = normalize(to - from);
+
+const float MAX_SCENE = distance(from, to) - 0.005;
+
+float mi = 0.0;
+float ma = MAX_SCENE;
+```
+
+Then we initialize the stack and start at the root node:
+
+```glsl
+StackEntry stack[STACK_LIMIT];
+uint stack_ptr = 1;
+
+uint idx = 0;
+
+uint split_idx = 0;
+
+BspNode node = nodes[0];
+```
+
+The outer loop runs until the stack is empty. The inner loop descends through internal nodes until it reaches a leaf.
+
+At each node we compute `num` (signed distance of the ray origin to the plane) and `denom` (how fast the ray approaches the plane). From these we can determine the near and far children:
+
+```glsl
+while (node.content == 0xffffffff) {
+    float num = 0.0;
+    float denom = dot(node.plane.xyz, dir);
+
+    if (node.type < 3) {
+        num = from[node.type] - node.plane.w;
+    } else {
+        num = dot(node.plane.xyz, from) - node.plane.w;
+    }
+
+    uint near = 0;
+    uint far = 0;
+```
+
+We assign near and far based on which side the ray origin is on. When `num` is zero, the origin lies on the plane — we use the ray direction to break the tie:
+
+```glsl
+if (abs(num) <= EPSILON) {
+    if (denom >= 0.0) {
+        near = node.front;
+        far = node.back;
+    } else {
+        near = node.back;
+        far = node.front;
+    }
+} else if (num > 0.0) {
+    near = node.front;
+    far = node.back;
+} else {
+    near = node.back;
+    far = node.front;
+}
+```
+
+Next we handle the case where the ray is perpendicular to the splitting plane (no intersection possible). If the ray also lies on the plane, we push the far node onto the stack to check later:
+
+```glsl
+if (abs(denom) <= EPSILON) {
+    // Is perpendicular
+    if (abs(num) <= EPSILON) {
+        // Is on the plane
+        split_idx = node.plane_idx;
+
+        if (stack_ptr < STACK_LIMIT) {
+            stack[stack_ptr] = StackEntry(far, split_idx, mi, ma);
+            stack_ptr++;
+        }
+    }
+    idx = near;
+}
+```
+
+Otherwise, we compute the intersection distance `split` along the ray. There are three cases:
+
+- `split` is outside the current interval `[mi, ma]` or behind the origin — both points are on the same side, follow the near child.
+- `split` falls before `mi` — both points are past the split, follow the far child.
+- `split` is inside the interval — push the far child with the updated interval, descend into the near child, and tighten the interval maximum to `split`.
+
+```glsl
+float split = -(num / denom);
+
+if (abs(split) <= EPSILON) {
+    split = abs(split);
+}
+
+if ((split >= ma) || (split <= 0.0)) {
+    idx = near;
+} else if (split <= mi) {
+    idx = far;
+} else {
+    split_idx = node.plane_idx;
+
+    if (stack_ptr < STACK_LIMIT) {
+        stack[stack_ptr] = StackEntry(far, split_idx, split, ma);
+        stack_ptr++;
+    }
+    idx = near;
+    ma = split;
+}
+```
+
+Finally, advance to the selected node:
+
+```glsl
+node = nodes[idx];
+```
+
+When we reach a leaf, we check its content. If solid, we return true — but only if the splitting plane ID differs from the plane the destination point belongs to (to avoid self-shadowing):
+
+```glsl
+if (node.content == 1) {
+    return split_idx != plane_idx;
+}
+```
+
+If the leaf is empty, we pop the stack and continue:
+
+```glsl
+if (stack_ptr > 0) {
+    stack_ptr--;
+    const StackEntry entry = stack[stack_ptr];
+
+    idx = entry.node;
+    mi = entry.mi;
+    ma = entry.ma;
+    split_idx = entry.split;
+
+    node = nodes[idx];
+} else {
+    break;
+}
+```
+
+The main shader function reconstructs the world-space position from depth and inverse camera matrices, then casts a ray from each light to that position. If the ray is unobstructed, the light contribution is accumulated:
+
+```glsl
+ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(outImg);
+
+if (pixel.x >= size.x || pixel.y >= size.y)
+    return;
+
+const vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+const vec2 ndc = uv * 2.0 - 1.0;
+
+float depth = texture(depthTex, uv).r;
+vec3 normal = texture(normalTex, uv).rgb;
+
+const vec4 clip = vec4(ndc, depth, 1.0);
+vec4 view = invProjection * clip;
+view /= view.w;
+const vec3 world = (invView * view).xyz;
+
+const uint plane = texture(planeTex, uv).r;
+const float scale = 0.9999;
+
+vec3 result = vec3(0);
+for (uint i = 0; i < light_count; i++) {
+    const Light l = lights[i];
+
+    if (!raycast(l.pos, world, plane)) {
+      const vec3 light = l.pos - world;
+      const vec3 light_dir = normalize(light);
+
+      const float dist = length(light);
+      const float weight = max(dot(light_dir, normal), 0.0);
+
+      const float attenuation = max(dist * -0.1 + 2.0, 0.0);
+      result += l.color * weight * attenuation;
+    }
+}
+```
+
+---
+
+### Texel-space shadows
+
+If you look closely at the shadows, you'll notice they look pixelated — and that's not a resolution issue.
+
+I implemented <New>texel-space shadows</New> based on this [Unity forum article](https://discussions.unity.com/t/the-quest-for-efficient-per-texel-lighting/700574). The technique was first tested in [Surging Blood](/left/surging), but `dFdX` introduced some artifacts:
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_artifact.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">dFdX artifacts on shadow edges</figcaption>
+</figure>
+
+I'm not sure whether this is a bug in my implementation, a precision limitation in Godot's shadow system, or inherent `dFdX` imprecision — but I wanted a more stable result.
+
+My fix: I sample the X and Y axes of the UV grid to compute a world-space offset for each texel, store it in a texture, and read it back in the light compute shader. The result:
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_pixel_shadow.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Texel-space shadows — more stable result</figcaption>
+</figure>
+
+This is much more stable, though still not perfect. Two remaining issues:
+
+**Precision loss** — snapping world positions to a texture format loses precision. A better approach would be to encode the offset directly rather than the absolute position.
+
+**Partly-visible pixels** — texels that are only partially visible can appear fully unlit, because their snapped world position happens to land in an unreachable spot.
+
+<figure className="img-900">
+  <img className="w-full rounded-md border border-zinc-200" src="/images/quake_unlit.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Partly-visible pixels appearing fully unlit</figcaption>
+</figure>
+
+One direction worth exploring is per-texel multisampling: cast several rays per texel at slightly offset positions and average the results. You could derive the offsets from the UV grid axes and the snapped world position at each corner. This wouldn't necessarily increase the total raycast count (since we're not reusing results across texels), but it would smooth out the hard edges — making it more of an art choice than a technical requirement.
+
+Soft shadows via area lights are another option, but they tend to be expensive, so point lights remain the practical choice for now.

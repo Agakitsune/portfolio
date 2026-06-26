@@ -1,0 +1,1376 @@
+---
+title: "Making Minecraft Neon with Bloom"
+description: Trying to make some neons with Minecraft blocks and Bloom
+published: true
+tags:
+  - Graphics
+  - Godot
+
+---
+
+One day, I was watching a [video by Mogswamp](https://www.youtube.com/watch?v=4NwXgxW3dRs) where the concept was building a Battle Arena with a theme, and he built a Cyberpunk city.
+
+There is a moment in the video at about 13:25 that inspired me:
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/bloom_ins.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">So pretty...</figcaption>
+</figure>
+
+I'm not sure how this render was achieved, but using blocks to represent glowing signs and neon inspired me to try to do the same.
+
+---
+
+### Prelude
+
+Since Godot's built-in Bloom isn't very interesting to me, I wanted to implement my own — so I'll use the **Compositor** and the **Rendering Device**.
+
+*What are the **Compositor** and the **Rendering Device**?*
+
+With Godot, you can use nodes to render sprites, meshes, etc., but sometimes this can get heavy on the engine. Say you have a Card scene that renders a sprite, a frame, a shader, and so on. Then you open an inventory that iterates over your cards, instantiates a Card scene for each one, adds it to the scene — and performance tanks for a moment. So many nodes get added at once that there's a noticeable spike.
+
+There are some solutions like object pools or keeping nodes in the scene, but one approach is to use the [**Rendering Server**](https://docs.godotengine.org/en/stable/classes/class_renderingserver.html).
+
+The **Rendering Server** is the API Godot uses to render everything — each Sprite2D, MeshInstance3D, ColorRect, all of it passes through the **Rendering Server**.
+
+I won't go into detail on how to use it here; this [video by Firebelley Games](https://www.youtube.com/watch?v=1PnG3r1rKcs) inspired this example and covers it well.
+
+You just need to know that the **Rendering Server** is an API that lets you bypass the scene system and improve performance — but we can go even lower: the **Rendering Device**.
+
+Godot supports multiple modern low-level graphics APIs such as Vulkan. To avoid checking everywhere whether it's using D3D12 or Vulkan, Godot provides an abstraction called the **Rendering Device**, which lets us work directly with the underlying graphics API. The catch is that it's harder to use — if you're not familiar with how modern low-level graphics APIs work, I'd strongly discourage using it directly, though you can still follow this article to understand some of the concepts.
+
+Generally, communicating with the **Rendering Device** is difficult since you can't inject your rendering at arbitrary points. That's where Godot 4.4's **Compositor** comes in. You can insert a **CompositorEffect** at these points in the rendering pipeline:
+
+- <Ref>Pre Opaque</Ref>: before the Opaque pass, but after the Depth Pre-pass
+- <Ref>Post Opaque</Ref>: after the Opaque pass
+- <Ref>Post Sky</Ref>: after the Sky pass, but before back buffers have been created
+- <Ref>Pre Transparent</Ref>: before the Transparent pass, after the Sky pass and after back buffers have been created
+- <Ref>Post Transparent</Ref>: after the Transparent pass
+
+To create your own effect, you create a script extending **CompositorEffect**:
+
+```gdscript
+@tool
+extends CompositorEffect
+class_name PostProcessShader
+```
+
+> `@tool` allows your code to run even in the Editor — [see the documentation here](https://docs.godotengine.org/en/4.4/tutorials/plugins/running_code_in_the_editor.html)
+
+You can add functions such as `_init` and `_notification`, but you must implement this one:
+
+```gdscript
+func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data: RenderData):
+```
+
+This function is called every frame the Compositor renders. `p_effect_callback_type` indicates which point in the pipeline we're at (from the list above), and `p_render_data` holds data such as textures, the uniform buffer, and the camera projection and transformation — we'll use it a lot.
+
+---
+
+### How to work with the RenderingDevice
+
+This is where the fun begins.\
+First, we fetch the RenderingDevice in the `_init` function:
+
+```gdscript
+var rd: RenderingDevice
+
+func _init() -> void:
+	rd = RenderingServer.get_rendering_device()
+```
+
+Then we need to understand a bit more about how modern graphics APIs work. I'll use Vulkan as the example since I'm most familiar with it.
+
+We'll skip the Window, VkSurface, VkSwapchainKHR, VkInstance, VkPhysicalDevice, and VkDevice, as those are handled by Godot.
+
+We begin with the Mesh. If you're familiar with OpenGL, you'll know you need a Buffer to store vertex data and possibly another for index data — that's the same here. You might also remember needing something called a Vertex Array that stores all the vertex attributes — that's also the case here, though the name differs.
+
+Let's start by creating the Vertex Buffer:
+
+```gdscript
+var vbo: RID
+
+func _init() -> void:
+  # ...
+
+  var data = PackedVector3Array([
+    Vector3(1.0, 1.0, 0.0),
+    Vector3(1.0, -1.0, 0.0),
+    Vector3(-1.0, 1.0, 0.0),
+    Vector3(-1.0, -1.0, 0.0),
+  ])
+	
+  vbo = rd.vertex_buffer_create(
+    data.size() * 12,
+    data.to_byte_array()
+  )
+```
+
+You need to pass the size in <Ref>bytes</Ref> of your data, then a <Ref>PackedByteArray</Ref>. Most <Ref>PackedArray</Ref> types have a `to_byte_array` method for fast conversion.
+
+Creating an <Ref>Index Buffer</Ref> is straightforward too. It isn't strictly necessary to render something, but we'll skip the Hello World triangle and go straight to the point:
+
+```gdscript
+var ebo: RID
+
+func _init() -> void:
+  # ...
+
+  var indexes = PackedInt32Array([
+    0, 1, 2, 2, 1, 3
+  ]);
+	
+  ebo = rd.index_buffer_create(
+    indexes.size(),
+    RenderingDevice.INDEX_BUFFER_FORMAT_UINT32,
+    indexes.to_byte_array()
+  )
+```
+
+You need to pass the count of indices, the index format (UINT16 or UINT32), and a <Ref>PackedByteArray</Ref> with the index data.
+
+Now we create a <Ref>Vertex Format</Ref>, which we need to set up the Vertex Array:
+
+```gdscript
+var vtx_format: int
+
+func _init() -> void:
+  # ...
+
+  var attributes = [
+    RDVertexAttribute.new()
+  ]
+  attributes[0].format = RenderingDevice.DATA_FORMAT_R32G32B32_SFLOAT
+  attributes[0].frequency = RenderingDevice.VERTEX_FREQUENCY_VERTEX
+  attributes[0].location = 0
+  attributes[0].offset = 0
+  attributes[0].stride = 12
+	
+  vtx_format = rd.vertex_format_create(attributes);
+```
+
+Each vertex attribute has a format that determines the layout of the data. SFLOAT means signed float, 32 means 32-bit, and RGB means 3 channels — so we can use raw Vector3 for vertex positions.\
+The frequency is used for instancing: you'd set it to INSTANCE to change the parameter per instance rather than per vertex. We don't need that, so we leave it at VERTEX.\
+The location matches the location in the shader — we'll see that shortly.\
+The offset and stride work the same as in OpenGL.
+
+> In OpenGL, a stride of 0 means tightly packed. In Vulkan, even if your data is tightly packed, you must pass the size of the data explicitly.
+
+Next we create a <Ref>Vertex Array</Ref> and an <Ref>Index Array</Ref>. These don't map directly to anything in Vulkan, but they help configure the DrawList we use later:
+
+```gdscript
+var vao: RID
+var eao: RID
+
+func _init() -> void:
+  # ...
+
+  vao = rd.vertex_array_create(
+    4,
+    vtx_format,
+    [vbo],
+    [0]
+  )
+	
+  eao = rd.index_array_create(
+    ebo,
+    0,
+    indexes.size()
+  )
+```
+
+The Vertex Array needs:
+- The number of vertices — even though it will be overridden by the DrawList, you can't pass 0.
+- The Vertex Format.
+- The list of Vertex Buffers to use — the array size must match the number of attributes.
+- The list of byte offsets into the corresponding buffers — this can be empty (inferring zero), but if provided, its size must match the buffers array.
+
+The Index Array needs:
+- The Index Buffer
+- The offset into the index array (not in bytes)
+- The number of indices
+
+Now we create a <Ref>Framebuffer</Ref>. A Framebuffer is always required, even to target the main buffer — you need a list of texture targets for it. Since we want to render to the screen, we'll use **RenderData** to get those:
+
+```gdscript
+var color_texture: RID
+var depth_texture: RID
+
+var fbo: RID
+
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  var render_scene_buffers: RenderSceneBuffersRD = render_data.get_render_scene_buffers()
+
+  if render_scene_buffers:
+    var size = render_scene_buffers.get_internal_size()
+    if size.x == 0 and size.y == 0:
+      return
+
+    color_texture = render_scene_buffers.get_color_texture()
+    depth_texture = render_scene_buffers.get_depth_texture()
+
+    fbo = rd.framebuffer_create([color_texture, depth_texture])
+```
+
+Now that we have a Framebuffer targeting Godot's Color and Depth buffers, we can set up the biggest object of all: the **Graphics Pipeline**:
+
+```gdscript
+var pipeline: RID
+
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  # ...
+  
+  pipeline = rd.render_pipeline_create(
+    shader,
+    framebuffer_format,
+    vertex_format,
+    primitive,
+    rasterization_state,
+    multisampler_state,
+    depth_stencil_state,
+    color_blend_state,
+    0, 0, []
+  )
+```
+
+That's a lot of parameters — and Godot already simplifies it a bit compared to raw Vulkan. Let's go through each one:
+
+- <Ref>The Shader</Ref>: In OpenGL this is what you would call a Program. Godot uses a single GLSL file that stores all shader stages — we'll look at how to create one shortly.
+- <Ref>The Framebuffer Format</Ref>: `rd.framebuffer_get_format` returns the format of an existing framebuffer. You can also create one using the `rd.framebuffer_format_create_*` family of functions.
+- <Ref>The Vertex Format</Ref>: We created this earlier. The pipeline will only render correctly with meshes that match this format.
+- <Ref>The Primitive type</Ref>: TRIANGLE_LIST, TRIANGLE_STRIP, etc. — similar to OpenGL.
+- <Ref>The Rasterization State</Ref>: Exposes many parameters. The most commonly used are Cull Mode (FRONT or BACK) and Front Face (Clockwise or CounterClockwise).
+- <Ref>The Multisampling State</Ref>: Controls MSAA/SSAA. We won't use it for this project.
+- <Ref>The Depth Stencil State</Ref>: Controls Depth Testing and Stencil Testing operations. We'll cover the parameters we need as we use them.
+- <Ref>The Color Blend State</Ref>: Controls blending. Since we won't do transparent objects, I won't cover this in detail.
+- <Ref>The Dynamic Flags</Ref>: Allows some pipeline parameters to be changed dynamically at draw time (e.g., the Stencil Reference). We won't use them — and some aren't fully implemented yet.
+- <Ref>The Subpass</Ref>: Useful for multipass rendering. Not relevant here.
+- <Ref>The Specialization Constants</Ref>: Allow you to create shader variants without branching on `if` statements. Not covered here.
+
+Now let's create the Shader:
+
+```gdscript
+var shader: RID
+
+func _init() -> void:
+  # ...
+
+  var shader_file: RDShaderFile = load("uid://i3u1s2viipes")
+  var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
+  shader = rd.shader_create_from_spirv(shader_spirv)
+```
+
+We load a GLSL file, extract its SPIR-V data, and compile it into a shader.\
+The shader looks like this:
+
+```glsl
+#[vertex]
+
+#version 450
+
+layout(location = 0) in vec3 pos;
+
+layout(binding = 0) uniform godotData {
+    mat4 projection;
+    mat4 inv_projection;
+    mat4 inv_view;
+    mat4 view;
+};
+
+layout(binding = 2) uniform modelData {
+    mat4 model;
+};
+
+void main() {
+    gl_Position = projection * view * model * vec4(pos, 1.0);
+}
+
+#[fragment]
+
+#version 450
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    outColor = vec4(1.0);
+}
+```
+
+Let's break down what we see here:
+
+- `#[vertex]`
+
+This tells Godot that the GLSL code below belongs to the Vertex Shader. The same tag exists for `#[fragment]` and `#[compute]`.
+
+- `layout(location = 0) in vec3 pos;`
+
+In OpenGL you could omit `layout(location = 0)` and write just:
+```glsl
+in vec3 pos;
+```
+...then look up the location with `glGetAttribLocation`:
+```c
+glGetAttribLocation(program, "pos");
+```
+
+You can't do that in Vulkan — the location must be declared in the shader.
+
+> The location in the shader must match the `location` field of the corresponding **RDVertexAttribute**.
+
+- `layout(binding = 0) uniform godotData`
+
+We'll talk more about Uniform Buffer Objects later. For now, just know this is Godot's built-in data: it stores the projection and view matrices we need to properly transform our meshes.
+
+> Since Godot 4.6, the view matrix changed from `mat4` to `mat3x4`, so you'll need to update the struct accordingly.
+
+- `layout(binding = 1) uniform modelData`
+
+Our own data, containing the model matrix.
+
+- `layout(location = 0) out vec4 outColor;`
+
+The color output. The location must match the corresponding Color Target in the Framebuffer.
+
+---
+
+Now that we have a Shader, we can create the **Graphics Pipeline**:
+
+```gdscript
+var pipeline: RID
+
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  # ...
+  
+  pipeline = rd.render_pipeline_create(
+    shader,
+    rd.framebuffer_get_format(fb),
+    vtx_format,
+    RenderingDevice.RENDER_PRIMITIVE_TRIANGLES,
+    rasterization_state,
+    multisample_state,
+    depth_stencil_state,
+    color_blend_state,
+    0, 0, []
+  )
+```
+
+We can now fill in the shader, Framebuffer Format, Vertex Format, and Primitive parameters. Let's set up the rest:
+
+```gdscript
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  # ...
+
+  var rasterization_state := RDPipelineRasterizationState.new()
+  rasterization_state.cull_mode = RenderingDevice.POLYGON_CULL_BACK
+  rasterization_state.front_face = RenderingDevice.POLYGON_FRONT_FACE_CLOCKWISE
+  
+  var multisample_state = RDPipelineMultisampleState.new()
+  
+  var depth_stencil_state = RDPipelineDepthStencilState.new()
+  depth_stencil_state.enable_depth_test = true
+  depth_stencil_state.enable_depth_write = true
+  depth_stencil_state.depth_compare_operator = RenderingDevice.COMPARE_OP_GREATER_OR_EQUAL
+  
+  var attachment = RDPipelineColorBlendStateAttachment.new()
+  attachment.enable_blend = false
+  
+  var color_blend_state = RDPipelineColorBlendState.new()
+  color_blend_state.attachments = [
+    attachment
+  ]
+
+  # ...
+```
+
+This sets up a simple rasterizer with back-face culling. The multisample state keeps its defaults. We enable Depth Testing and Depth Writing with a GREATER_OR_EQUAL compare operator. The blend state has one attachment since our Framebuffer has only one Color Target.
+
+And that's all we need to render something. We'll continue with Uniform Buffers and Descriptor Sets, but you can compare your code to [this repository](https://github.com/acui/customized-pipeline/blob/master/scripts/customized_pipeline.gd) which renders a simple triangle.
+
+---
+
+As its name suggests, a Uniform Buffer is a buffer used to store uniform data. Creating one is as simple as creating a Vertex Buffer:
+
+```gdscript
+var ubo: RID
+
+func _init() -> void:
+  # ...
+
+  ubo = rd.uniform_buffer_create(64)
+```
+
+We pass the size in bytes. You can also pass the initial data as a <Ref>PackedByteArray</Ref>, but we'll do that later. Since we're storing a single mat4, we need 4 × 4 × 4 = 64 bytes.
+
+The last thing to explore is **Uniform Sets** — objects that describe how uniforms are bound, their types, and which binding slots they occupy:
+
+```gdscript
+# ...
+
+var uniform_set: RID
+
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  var data: RenderSceneDataRD = render_data.get_render_scene_data()
+
+  # ...
+
+  var godot_uniform := RDUniform.new()
+  godot_uniform.binding = 0
+  godot_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+  godot_uniform.add_id(data.get_uniform_buffer())
+  
+  var transform_uniform := RDUniform.new()
+  transform_uniform.binding = 1
+  transform_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+  transform_uniform.add_id(ubo)
+
+  uniform_set = UniformSetCacheRD.get_cache(shader, 0, [godot_uniform, transform_uniform])
+```
+
+Each **RDUniform** specifies the binding slot (which must match the binding in the shader), the uniform type (UNIFORM_BUFFER in our case), and the buffer to bind via `add_id`.
+
+Note that we're using `UniformSetCacheRD` rather than creating the uniform set directly on the **RenderingDevice**. This cache returns the same RID for the same inputs, avoiding redundant allocations.
+
+---
+
+Now we have everything we need to render to the screen. Let's set up the **DrawList**:
+
+```gdscript
+func _render_callback(callback_type: int, render_data: RenderData) -> void:
+  rd.draw_command_begin_label("Pre Depth Mesh", Color(0.773, 0.659, 0.671, 1.0))
+	
+  rd.buffer_update(
+    ubo,
+    0, 64,
+    _transform_to_array([Transform3D()])
+  )
+  
+  var draw_list = rd.draw_list_begin(fbo, RenderingDevice.DRAW_CLEAR_COLOR_0, [Color()])
+    
+  rd.draw_list_bind_render_pipeline(draw_list, pipeline)
+  rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
+  rd.draw_list_bind_vertex_array(draw_list, vao)
+  rd.draw_list_bind_index_array(draw_list, eao)
+  rd.draw_list_draw(draw_list, true, 1)
+  
+  rd.draw_list_end()
+  
+  rd.draw_command_end_label()
+```
+
+Let's break down what's happening here:
+
+- `draw_command_begin_label`
+
+This is for debugging. In [RenderDoc](https://renderdoc.org/) for example, you can see the label in the Event Browser, making it easier to navigate your frame:
+
+<figure>
+  <img className="w-50% rounded-md border border-zinc-200" src="/images/bloom_doc.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">We can see the 'Pre Depth Mesh' label with our buffer copy and draw call inside</figcaption>
+</figure>
+
+- `buffer_update`
+
+Updates our UBO with a transformation. We pass the buffer, the destination offset, the number of bytes to write, and a <Ref>PackedByteArray</Ref> with the data.\
+`_transform_to_array` is a helper that converts a list of <Ref>Transform3D</Ref> to a byte array:
+
+```gdscript
+func _transform_to_array(
+  transforms: Array[Transform3D]
+) -> PackedByteArray:
+  var arr: PackedByteArray
+  arr.resize(transforms.size() * 64)
+  
+  for i in range(transforms.size()):
+    var basis := transforms[i].basis
+    var trans := transforms[i].origin
+    
+    arr.encode_float(i * 64 + 0, basis.x.x)
+    arr.encode_float(i * 64 + 4, basis.x.y)
+    arr.encode_float(i * 64 + 8, basis.x.z)
+    arr.encode_float(i * 64 + 12, 0.0)
+    arr.encode_float(i * 64 + 16, basis.y.x)
+    arr.encode_float(i * 64 + 20, basis.y.y)
+    arr.encode_float(i * 64 + 24, basis.y.z)
+    arr.encode_float(i * 64 + 28, 0.0)
+    arr.encode_float(i * 64 + 32, basis.z.x)
+    arr.encode_float(i * 64 + 36, basis.z.y)
+    arr.encode_float(i * 64 + 40, basis.z.z)
+    arr.encode_float(i * 64 + 44, 0.0)
+    arr.encode_float(i * 64 + 48, trans.x)
+    arr.encode_float(i * 64 + 52, trans.y)
+    arr.encode_float(i * 64 + 56, trans.z)
+    arr.encode_float(i * 64 + 60, 1.0)
+  
+  return arr
+```
+
+- `draw_list_begin`
+
+Begins the rendering pass. We pass:
+
+  - Our Framebuffer
+  - A flags value that tells Godot what to do with the targets. Here's the full list:
+    - <Ref>DRAW_DEFAULT_ALL</Ref>: Do not clear or ignore any attachments.
+    - <Ref>DRAW_CLEAR_COLOR_0</Ref> through `DRAW_CLEAR_COLOR_7`: Clear the corresponding color attachment.
+    - <Ref>DRAW_CLEAR_COLOR_MASK</Ref>: Mask for clearing all color attachments.
+    - <Ref>DRAW_CLEAR_COLOR_ALL</Ref>: Clear all color attachments.
+    - <Ref>DRAW_IGNORE_COLOR_0</Ref> through `DRAW_IGNORE_COLOR_7`: Ignore the previous contents of the corresponding color attachment.
+    - <Ref>DRAW_IGNORE_COLOR_MASK</Ref>: Mask for ignoring all color attachments.
+    - <Ref>DRAW_IGNORE_COLOR_ALL</Ref>: Ignore all color attachments.
+    - <Ref>DRAW_CLEAR_DEPTH</Ref>: Clear the depth attachment.
+    - <Ref>DRAW_IGNORE_DEPTH</Ref>: Ignore the previous contents of the depth attachment.
+    - <Ref>DRAW_CLEAR_STENCIL</Ref>: Clear the stencil attachment.
+    - <Ref>DRAW_IGNORE_STENCIL</Ref>: Ignore the previous contents of the stencil attachment.
+    - <Ref>DRAW_CLEAR_ALL</Ref>: Clear all attachments.
+    - <Ref>DRAW_IGNORE_ALL</Ref>: Ignore all attachments.
+  - A list of clear colors. If you're clearing Color Target 1, the corresponding clear color must be at index 1 in this list.
+
+- `draw_list_bind_render_pipeline`: Binds the Graphics Pipeline to use for rendering.
+
+- `draw_list_bind_uniform_set`: Binds the Uniform Set. The last parameter specifies which set index to bind to — you can leave it at 0.
+
+- `draw_list_bind_vertex_array`: Binds the Vertex Buffers from the Vertex Array and sets the draw parameters.
+
+- `draw_list_bind_index_array`: Binds the Index Buffer from the Index Array and sets the draw parameters.
+
+- `draw_list_draw`: Renders the mesh. The first parameter specifies whether to use an Index Buffer — when true, it uses the draw parameters from the bound Index Array; otherwise it uses the Vertex Array. The second specifies the instance count, which should still be 1 even when not using instancing.
+
+If you've set everything up correctly, you should see a white square in a black void:
+
+<figure>
+  <img className="w-50% rounded-md border border-zinc-200" src="/images/bloom_result.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">White square in a black void</figcaption>
+</figure>
+
+---
+
+### The Depth Pre-pass
+
+> If you're not familiar with rendering using the **RenderingDevice**, I highly recommend reading the section above and experimenting on your own before continuing — I won't re-explain the functions and parameters here.
+
+This step isn't strictly necessary since we won't be rendering anything else and the consequences of overdrawing are negligible in this setup, but it's a good exercise.
+
+For a Depth Pre-pass, we set up a **CompositorEffect** at the Pre Opaque point, create a Framebuffer with only the Depth texture, and build a pipeline with only a vertex shader and a GREATER_OR_EQUAL Depth Test/Write.\
+This draws our geometry, tests it against the Depth Buffer, and writes only to the Depth Buffer — no color output.
+
+```glsl
+#[vertex]
+
+#version 450
+
+layout(location = 0) in vec3 pos;
+
+layout(binding = 0) uniform godotData {
+    mat4 projection;
+    mat4 inv_projection;
+    mat4 inv_view;
+    mat4 view;
+};
+
+layout(binding = 1) uniform modelData {
+    mat4 model;
+};
+
+void main() {
+    gl_Position = projection * view * model * vec4(pos, 1.0);
+}
+```
+*The depth shader*
+
+> I'm using a helper API I made for faster development, but all parameters will be mentioned so you can recreate it yourself.
+
+```gdscript
+if not (depth_fbo.is_valid() and rd.framebuffer_is_valid(depth_fbo)):
+  depth_fbo = RDHelper.depth_only_pass(
+    buffers.get_depth_texture()
+  )
+    
+if not depth_pipeline.is_valid():
+  depth_pipeline = RDHelper.depth_only_pipeline(
+    depth_shader,
+    depth_fbo,
+    cube_mesh.vtx_format,
+    cube_mesh.primitive
+)
+```
+*Creating the Framebuffer and Pipeline*
+
+What will the rendered mesh be? Since this is Minecraft-inspired, it'll be a cube with each face mapped to a 0,0–1,1 UV range:
+
+<figure>
+  <img className="w-50% rounded-md border border-zinc-200" src="/images/bloom_uv_cube.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Not 100% accurate, but close enough</figcaption>
+</figure>
+
+We also set up our Uniform Set with Godot's UBO and our own:
+
+```gdscript
+if depth_uniform_set.uniforms.is_empty():
+    depth_uniform_set.uniform_buffer(
+      data.get_uniform_buffer()
+    )
+    depth_uniform_set.uniform_buffer(
+      transform_ubo
+    )
+```
+
+And now we draw. We've set up some external scripts to convert nodes into cubes — we have 4 cubes stacked on top of each other:
+
+```gdscript
+rd.draw_command_begin_label("Pre Depth Mesh", Color(0.773, 0.659, 0.671, 1.0))
+    
+  for b in blocks:
+    rd.buffer_update(
+      transform_ubo,
+      0, 64,
+      _transform_to_array(b.global_transform)
+    )
+    
+    var draw_list = rd.draw_list_begin(depth_fbo, RenderingDevice.DRAW_DEFAULT_ALL)
+    
+    rd.draw_list_bind_render_pipeline(draw_list, depth_pipeline)
+    RDHelper.draw_list_bind_mesh(draw_list, cube_mesh)
+    rd.draw_list_bind_uniform_set(draw_list, depth_uniform_set.cache(depth_shader), 0)
+    rd.draw_list_draw(draw_list, true, 1)
+    
+    rd.draw_list_end()
+  
+rd.draw_command_end_label()
+```
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/bloom_depth_pass.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The depth values of the 4 cubes</figcaption>
+</figure>
+
+> If you're using **RenderDoc** and don't see anything in your Depth Buffer, make sure the Black/White range is set correctly, or that your mesh is actually being rendered.
+
+---
+
+### The Color Pass
+
+Now we work on the color pass. For now, we focus on getting something on screen.
+
+We set up another **CompositorEffect** at the <Ref>Post Opaque</Ref> point and a new shader:
+
+```glsl
+#[vertex]
+
+#version 450
+
+layout(location = 0) in vec3 pos;
+layout(location = 1) in vec2 uv;
+
+layout(binding = 0) uniform godotData {
+    mat4 projection;
+    mat4 inv_projection;
+    mat4 inv_view;
+    mat4 view;
+};
+
+layout(binding = 2) uniform modelData {
+    mat4 model;
+};
+
+layout(location = 0) out vec2 fragUV;
+
+void main() {
+    gl_Position = projection * view * model * vec4(pos, 1.0);
+    fragUV = uv;
+}
+
+#[fragment]
+
+#version 450
+
+layout(location = 0) in vec2 fragUV;
+
+layout(binding = 1) uniform sampler2D textureSampler;
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    outColor = texture(textureSampler, fragUV);
+}
+```
+
+Next we create the Framebuffer and Graphics Pipeline:
+
+```gdscript
+if not (color_fbo.is_valid() and rd.framebuffer_is_valid(color_fbo)):
+  color_fbo = RDHelper.color_pass(
+    buffers.get_color_texture(),
+    buffers.get_depth_texture()
+  )
+
+if not color_pipeline.is_valid():
+  color_pipeline = RDHelper.color_pipeline(
+    color_shader,
+    color_fbo,
+    cube_mesh.vtx_format,
+    [
+      RDHelper.opaque()
+    ],
+    cube_mesh.primitive
+  )
+```
+
+We also fetch and store the texture of each cube — we'll need them later:
+
+```gdscript
+if block_textures.is_empty():
+  block_textures.resize(blocks.size())
+  for i in range(blocks.size()):
+    block_textures[i] = RDHelper.texture_from_godot(blocks[i].texture)
+```
+
+Then we create the Uniform Set, adding Godot's UBO, a texture sampler for the cube texture, and our own UBO:
+
+```gdscript
+if color_uniform_set.uniforms.is_empty():
+  color_uniform_set.uniform_buffer(
+    data.get_uniform_buffer()
+  )
+  color_uniform_set.texture_sampler(
+    near_sampler,
+    RID()
+  )
+  color_uniform_set.uniform_buffer(
+    transform_ubo
+  )
+```
+
+Then we draw, clearing the Color Buffer only on the first block and loading the previous result on subsequent ones:
+
+```gdscript
+for i in range(blocks.size()):
+  var b := blocks[i]
+  rd.buffer_update(
+    transform_ubo,
+    0, 64,
+    _transform_to_array(b.global_transform)
+  )
+  
+  var draw_list: int
+  if i == 0:
+    draw_list = rd.draw_list_begin(
+      color_fbo,
+      RenderingDevice.DRAW_CLEAR_COLOR_0,
+      tmp
+    )
+  else:
+    draw_list = rd.draw_list_begin(
+      color_fbo,
+      RenderingDevice.DRAW_DEFAULT_ALL,
+      tmp
+    )
+  
+  color_uniform_set.texture_sampler(
+    near_sampler,
+    block_textures[i],
+    1
+  )
+  
+  rd.draw_list_bind_render_pipeline(draw_list, color_pipeline)
+  RDHelper.draw_list_bind_mesh(draw_list, cube_mesh)
+  rd.draw_list_bind_uniform_set(draw_list, color_uniform_set.cache(color_shader), 0)
+  rd.draw_list_draw(draw_list, true, 1)
+  
+  rd.draw_list_end()
+
+rd.draw_command_end_label()
+```
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/bloom_color_pass.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">4 textured Minecraft blocks</figcaption>
+</figure>
+
+---
+
+### The Bloom Pass
+
+Bloom is an effect where light bleeds out to convey the appearance of bright light sources or regions.
+
+It's probably one of the most common post-processing effects used for visual polish. The typical implementation uses a two-pass Gaussian blur, which works well — but I don't love the look of it. Instead, I'll follow (most of) the implementation from [jdh](https://www.youtube.com/watch?v=PcMua73C_94), which is based on the [**Physically Based Bloom**](https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom) article on learnopengl.
+
+The process is:
+1. Render the scene to an HDR color buffer
+2. Downsample and blur into a separate texture
+3. Mix the bloom result back with the HDR color buffer, weighted toward the original
+
+The algorithm used in the article comes from [this post](https://web.archive.org/web/20060818101028/http://harkal.sylphis3d.com/2006/05/20/how-to-do-good-bloom-for-hdr-rendering/) and consists of:
+1. Downsample the HDR color buffer to half resolution, repeating as many times as you like
+2. Apply a 3×3 kernel and upsample back, repeating until you reach the original resolution
+3. Mix the bloom buffer with the HDR color buffer
+
+Normally you'd threshold the image first to blur only bright pixels and avoid turning your scene into a flashbang. With this technique, you instead downsample the whole image — the bright regions get blurred the most, while dark regions stay mostly untouched.
+
+My approach consists of rendering only what I want to bloom into a dedicated Bloom buffer, blurring it, then mixing it back.
+
+Since it's a post-effect, we set up our **CompositorEffect** at the <Ref>Post Transparent</Ref> point. We'll create textures for the Bloom pass and modify our Color pass to also write to the Bloom buffer.
+
+We create our Bloom textures with Color Attachment and Sampling usage (since we'll do both), using `R16G16B16A16_SFLOAT` as our HDR format, and gradually halving the resolution at each level.\
+We add Storage usage to the first texture since we'll write to it from a compute shader later:
+
+```gdscript
+const usage = RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	
+bloom_textures.resize(6)
+
+var tex_fmt := RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+
+bloom_textures[0] = buffers.create_texture(
+  "render_buffers", "bloom",
+  tex_fmt,
+  usage | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size,
+  0,
+  1,
+  true, false
+)
+
+bloom_textures[1] = buffers.create_texture(
+  "render_buffers", "bloom_1",
+  tex_fmt,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size / 2,
+  0,
+  1,
+  true, false
+)
+
+bloom_textures[2] = buffers.create_texture(
+  "render_buffers", "bloom_2",
+  tex_fmt,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size / 4,
+  0,
+  1,
+  true, false
+)
+
+bloom_textures[3] = buffers.create_texture(
+  "render_buffers", "bloom_3",
+  tex_fmt,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size / 8,
+  0,
+  1,
+  true, false
+)
+
+bloom_textures[4] = buffers.create_texture(
+  "render_buffers", "bloom_4",
+  tex_fmt,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size / 16,
+  0,
+  1,
+  true, false
+)
+
+bloom_textures[5] = buffers.create_texture(
+  "render_buffers", "bloom_5",
+  tex_fmt,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size / 32,
+  0,
+  1,
+  true, false
+)
+```
+
+We add the new Bloom target to our Color Pass and update the shader accordingly:
+
+```gdscript
+# ...
+
+if not (color_fbo.is_valid() and rd.framebuffer_is_valid(color_fbo)):
+  color_fbo = RDHelper.color_pass(
+    buffers.get_color_texture(),
+    buffers.get_depth_texture(),
+    [
+      bloom_textures[0]
+    ]
+  )
+
+# ...
+
+draw_list = rd.draw_list_begin(
+  color_fbo,
+  RenderingDevice.DRAW_CLEAR_COLOR_1 | RenderingDevice.DRAW_CLEAR_COLOR_0, # Clear the Bloom buffer on the first pass too
+  tmp
+)
+```
+
+```glsl
+//...
+
+layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outBloom;
+
+void main() {
+    outColor = texture(textureSampler, fragUV);
+    outBloom = outColor;
+}
+```
+
+For the downsample and upsample shaders, we'll use the ones from learnopengl:
+
+```glsl
+#[vertex]
+
+#version 450
+
+layout (location = 0) in vec2 aPosition;
+layout (location = 1) in vec2 aTexCoord;
+
+layout (location = 0) out vec2 texCoord;
+
+void main()
+{
+    gl_Position = vec4(aPosition.x, aPosition.y, 0.0, 1.0);
+    texCoord = aTexCoord;
+}
+
+#[fragment]
+
+#version 450
+
+// This shader performs upsampling on a texture,
+// as taken from Call Of Duty method, presented at ACM Siggraph 2014.
+
+// Remember to add bilinear minification filter for this texture!
+// Remember to use a floating-point texture format (for HDR)!
+// Remember to use edge clamping for this texture!
+layout (set = 0, binding = 0) uniform sampler2D srcTexture;
+
+layout (location = 0) in vec2 texCoord;
+layout (location = 0) out vec4 downsample;
+
+// Our push constant
+layout(push_constant, std430) uniform Params {
+	int use_karis;
+} params;
+
+float srgb_to_luma(vec3 col) {
+    //return dot(col, vec3(0.2126f, 0.7152f, 0.0722f));
+	return dot(col, vec3(0.299f, 0.587f, 0.114f));
+}
+
+vec4 karis_avg(vec4 col) {
+	// Formula is 1 / (1 + luma)
+	float luma = srgb_to_luma(pow(col.rgb, vec3(1.0 / 2.2))) * 0.25;
+	return vec4(col.rgb * (1.0 / (1.0 + luma)), col.a);
+}
+
+void main()
+{
+    ivec2 srcResolution = textureSize(srcTexture, 0);
+    vec2 srcTexelSize = 1.0 / vec2(srcResolution);
+    float x = srcTexelSize.x;
+    float y = srcTexelSize.y;
+
+    // Take 13 samples around current texel:
+    // a - b - c
+    // - j - k -
+    // d - e - f
+    // - l - m -
+    // g - h - i
+    // === ('e' is the current texel) ===
+    vec4 a = texture(srcTexture, vec2(texCoord.x - 2*x, texCoord.y + 2*y));
+    vec4 b = texture(srcTexture, vec2(texCoord.x,       texCoord.y + 2*y));
+    vec4 c = texture(srcTexture, vec2(texCoord.x + 2*x, texCoord.y + 2*y));
+
+    vec4 d = texture(srcTexture, vec2(texCoord.x - 2*x, texCoord.y));
+    vec4 e = texture(srcTexture, vec2(texCoord.x,       texCoord.y));
+    vec4 f = texture(srcTexture, vec2(texCoord.x + 2*x, texCoord.y));
+
+    vec4 g = texture(srcTexture, vec2(texCoord.x - 2*x, texCoord.y - 2*y));
+    vec4 h = texture(srcTexture, vec2(texCoord.x,       texCoord.y - 2*y));
+    vec4 i = texture(srcTexture, vec2(texCoord.x + 2*x, texCoord.y - 2*y));
+
+    vec4 j = texture(srcTexture, vec2(texCoord.x - x, texCoord.y + y));
+    vec4 k = texture(srcTexture, vec2(texCoord.x + x, texCoord.y + y));
+    vec4 l = texture(srcTexture, vec2(texCoord.x - x, texCoord.y - y));
+    vec4 m = texture(srcTexture, vec2(texCoord.x + x, texCoord.y - y));
+
+    // Apply weighted distribution:
+    // 0.5 + 0.125 + 0.125 + 0.125 + 0.125 = 1
+    // a,b,d,e * 0.125
+    // b,c,e,f * 0.125
+    // d,e,g,h * 0.125
+    // e,f,h,i * 0.125
+    // j,k,l,m * 0.5
+    // This shows 5 square areas that are being sampled. But some of them overlap,
+    // so to have an energy preserving downsample we need to make some adjustments.
+    // The weights are the distributed, so that the sum of j,k,l,m (e.g.)
+    // contribute 0.5 to the final color output. The code below is written
+    // to effectively yield this sum. We get:
+    // 0.125*5 + 0.03125*4 + 0.0625*4 = 1
+    vec4 groups[5];
+    if (params.use_karis == 1) {
+        groups[0] = (a+b+d+e) * (0.125f/4.0f);
+        groups[1] = (b+c+e+f) * (0.125f/4.0f);
+        groups[2] = (d+e+g+h) * (0.125f/4.0f);
+        groups[3] = (e+f+h+i) * (0.125f/4.0f);
+        groups[4] = (j+k+l+m) * (0.5f/4.0f);
+        groups[0] = karis_avg(groups[0]);
+        groups[1] = karis_avg(groups[1]);
+        groups[2] = karis_avg(groups[2]);
+        groups[3] = karis_avg(groups[3]);
+        groups[4] = karis_avg(groups[4]);
+        downsample = groups[0]+groups[1]+groups[2]+groups[3]+groups[4];
+        downsample = max(downsample, 0.0001);
+    } else {
+        downsample = e*0.125;
+        downsample += (a+c+g+i)*0.03125;
+        downsample += (b+d+f+h)*0.0625;
+        downsample += (j+k+l+m)*0.125;
+    }
+}
+```
+
+```glsl
+#[vertex]
+
+#version 450
+
+layout (location = 0) in vec2 aPosition;
+layout (location = 1) in vec2 aTexCoord;
+
+layout (location = 0) out vec2 texCoord;
+
+void main()
+{
+    gl_Position = vec4(aPosition.x, aPosition.y, 0.0, 1.0);
+    texCoord = aTexCoord;
+}
+
+#[fragment]
+
+#version 450
+
+// This shader performs upsampling on a texture,
+// as taken from Call Of Duty method, presented at ACM Siggraph 2014.
+
+// Remember to add bilinear minification filter for this texture!
+// Remember to use a floating-point texture format (for HDR)!
+// Remember to use edge clamping for this texture!
+layout (set = 0, binding = 0) uniform sampler2D srcTexture;
+
+layout (location = 0) in vec2 texCoord;
+layout (location = 0) out vec4 upsample;
+
+// Our push constant
+layout(push_constant, std430) uniform Params {
+	float filterRadius;
+} params;
+
+void main()
+{
+    // The filter kernel is applied with a radius, specified in texture
+    // coordinates, so that the radius will vary across mip resolutions.
+    float x = params.filterRadius;
+    float y = params.filterRadius;
+
+    // Take 9 samples around current texel:
+    // a - b - c
+    // d - e - f
+    // g - h - i
+    // === ('e' is the current texel) ===
+    vec4 a = texture(srcTexture, vec2(texCoord.x - x, texCoord.y + y));
+    vec4 b = texture(srcTexture, vec2(texCoord.x,     texCoord.y + y));
+    vec4 c = texture(srcTexture, vec2(texCoord.x + x, texCoord.y + y));
+
+    vec4 d = texture(srcTexture, vec2(texCoord.x - x, texCoord.y));
+    vec4 e = texture(srcTexture, vec2(texCoord.x,     texCoord.y));
+    vec4 f = texture(srcTexture, vec2(texCoord.x + x, texCoord.y));
+
+    vec4 g = texture(srcTexture, vec2(texCoord.x - x, texCoord.y - y));
+    vec4 h = texture(srcTexture, vec2(texCoord.x,     texCoord.y - y));
+    vec4 i = texture(srcTexture, vec2(texCoord.x + x, texCoord.y - y));
+
+    // Apply weighted distribution, by using a 3x3 tent filter:
+    //  1   | 1 2 1 |
+    // -- * | 2 4 2 |
+    // 16   | 1 2 1 |
+    upsample = e*4.0;
+    upsample += (b+d+f+h)*2.0;
+    upsample += (a+c+g+i);
+    upsample *= 1.0 / 16.0;
+}
+```
+
+> The downsample shader includes an optional **Karis Average** step. One known issue with bloom is "fireflies" — isolated bright pixels that, once blurred, create large bright flashes on screen.\
+> One fix is multisampling, but that's not always available. Another option is the **Karis Average**, a luminance-weighted sum that suppresses excessively bright pixels and prevents them from turning into fireflies.
+
+We now create our Framebuffers and Uniform Sets, one per texture:
+
+```gdscript
+const texture_count := 6
+
+sample_fbo.resize(texture_count)
+		
+for i in range(texture_count):
+  sample_fbo[i] = RDHelper.color_only_pass(
+    bloom_textures[i]
+  )
+
+sample_uniform_set.resize(texture_count)
+		
+for i in range(texture_count):
+  sample_uniform_set[i] = RDHelper.UniformSet.new()
+  sample_uniform_set[i].texture_sampler(
+    sampler,
+    bloom_textures[i]
+  )
+```
+
+Then we create our pipelines. With 6 textures, we need 5 Downsample and 5 Upsample passes:
+
+```gdscript
+var pass_count := texture_count - 1
+
+down_pipeline.resize(pass_count)
+
+for i in range(pass_count):
+  down_pipeline[i] = RDHelper.custom_pipeline(
+    downsample_shader,
+    sample_fbo[i + 1],
+    fullscreen.vtx_format,
+    [
+      RDHelper.gl_blend(
+        RenderingDevice.BLEND_OP_ADD,
+        RenderingDevice.BLEND_FACTOR_ONE,
+        RenderingDevice.BLEND_FACTOR_ONE
+      )
+    ]
+  )
+
+up_pipeline.resize(pass_count) 
+
+for i in range(pass_count):
+  up_pipeline[i] = RDHelper.custom_pipeline(
+    upsample_shader,
+    sample_fbo[pass_count - i],
+    fullscreen.vtx_format,
+    [
+      RDHelper.gl_blend(
+        RenderingDevice.BLEND_OP_ADD,
+        RenderingDevice.BLEND_FACTOR_ONE,
+        RenderingDevice.BLEND_FACTOR_ONE
+      )
+    ]
+  )
+```
+
+Each pipeline uses additive blending to accumulate the result.
+
+Now we downsample our image:
+
+```gdscript
+var karis_constant: PackedInt32Array = [
+  1,
+  0,
+  0,
+  0
+]
+
+rd.draw_command_begin_label("Downsampling", Color(0.941, 0.196, 0.376, 1.0))
+
+for i in range(pass_count):
+  var draw_list = rd.draw_list_begin(
+    sample_fbo[i + 1],
+    RenderingDevice.DRAW_CLEAR_COLOR_0,
+    tmp
+  )
+  
+  rd.draw_list_bind_render_pipeline(draw_list, down_pipeline[i])
+  RDHelper.draw_list_bind_mesh(draw_list, fullscreen)
+  rd.draw_list_bind_uniform_set(draw_list, sample_uniform_set[i].cache(downsample_shader), 0)
+  rd.draw_list_set_push_constant(draw_list, karis_constant.to_byte_array(), 16)
+  rd.draw_list_draw(draw_list, false, 1)
+  
+  karis_constant[0] = 0
+  
+  rd.draw_list_end()
+
+rd.draw_command_end_label()
+```
+
+Here we downsample into Bloom buffers 1 through 5, clearing each one and passing the push constant to enable the Karis Average on the first pass only.
+
+The mesh used here is a full-screen triangle — a common trick that maps the top-left corner to UV (0,0) and the bottom-right to UV (1,1). A quad mesh would work equally well.
+
+Now we need to set up the mixing pass. We'll use a compute shader for this:
+
+```glsl
+#[compute]
+
+#version 450
+
+// Invocations in the (x, y, z) dimension
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D scene_image;
+layout(rgba16f, set = 0, binding = 1) uniform image2D bloom_image;
+layout(rgba16f, set = 0, binding = 2) uniform image2D post_image;
+
+// Our push constant
+layout(push_constant, std430) uniform Params {
+	  vec2 raster_size;
+    float intensity;
+    int type;
+    // float threshold;
+} params;
+
+// The code we want to execute in each invocation
+void main() {
+    ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(params.raster_size);
+
+    if (uv.x >= size.x || uv.y >= size.y) {
+      return;
+    }
+
+	  vec3 scene_color = imageLoad(scene_image, uv).rgb;
+    vec3 bloom_color = imageLoad(bloom_image, uv).rgb;
+    // Additive
+    vec3 color = scene_color + bloom_color * params.intensity;
+    imageStore(post_image, uv, vec4(color, 1.0));
+}
+```
+
+Since we're reading from both the Color and Bloom buffers, we can't write back to the same buffer — so we create a temporary texture:
+
+```gdscript
+const usage = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+var size := buffers.get_internal_size()
+
+post_texture = buffers.create_texture(
+"render_buffers", "post",
+  RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
+  usage,
+  RenderingDevice.TEXTURE_SAMPLES_1,
+  size,
+  0,
+  1,
+  true, false
+)
+```
+
+We can now set up the <Ref>Compute Pipeline</Ref>, the Uniform Set that reads the Color and Bloom buffers, and execute the compute dispatch to write the mixed result into our temporary texture:
+
+```gdscript
+mix_pipeline = rd.compute_pipeline_create(mix_shader)
+
+mix_uniform.image(buffers.get_color_texture())
+mix_uniform.image(bloom_textures[0])
+mix_uniform.image(post_texture)
+  
+rd.draw_command_begin_label("Mix Bloom to Main", Color(0.431, 0.722, 0.835, 1.0))
+	
+var compute_list = rd.compute_list_begin()
+
+var compute_constant: PackedByteArray
+compute_constant.resize(16)
+compute_constant.encode_float(0, 640.0)
+compute_constant.encode_float(4, 360.0)
+compute_constant.encode_float(8, 0.12)
+compute_constant.encode_u32(12, BloomType.MIX)
+
+rd.compute_list_bind_compute_pipeline(compute_list, mix_pipeline)
+rd.compute_list_bind_uniform_set(compute_list, mix_uniform.cache(mix_shader), 0)
+rd.compute_list_set_push_constant(compute_list, compute_constant, compute_constant.size())
+rd.compute_list_dispatch(compute_list, 45, 23, 1)
+rd.compute_list_end()
+
+rd.draw_command_end_label()
+```
+
+> The mix intensity here is set to 0.12 — adjust it to taste.
+
+At this point you could inspect the result in <Ref>RenderDoc</Ref>, but let's keep going.\
+Now we just need to copy the temporary buffer back to the Color Buffer. Godot provides `rd.texture_copy` for this:
+
+```gdscript
+rd.texture_copy(
+  post_texture, # src
+  buffers.get_color_texture(), # dst
+  Vector3(0, 0, 0), # from
+  Vector3(0, 0, 0), # to
+  Vector3(size.x, size.y, 0), # size
+  0, 0, 0, 0 # src mip, dst mip, src layer, dst layer
+)
+```
+
+However, the <Ref>Color Buffer</Ref> needs to have been created with the `CAN_COPY_TO` flag to allow Transfer operations. Since it isn't, we'll need a simple copy compute shader instead:
+
+```glsl
+#[compute]
+
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// HDR source texture
+layout(binding = 0, rgba16f) readonly uniform image2D uHDRTex;
+
+// output image
+layout(binding = 1, rgba16f) writeonly uniform image2D uOutput;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uOutput);
+
+    if (pixel.x >= size.x || pixel.y >= size.y)
+        return;
+
+    imageStore(uOutput, pixel, imageLoad(uHDRTex, pixel));
+}
+```
+
+We set up the Pipeline, Uniform Set, and dispatch it:
+
+```gdscript
+copy_pipeline = rd.compute_pipeline_create(copy_shader)
+
+post_uniform.image(
+    post_texture
+  )
+  post_uniform.image(
+    buffers.get_color_texture()
+  )
+
+rd.draw_command_begin_label("Copy Processing", Color(0.765, 0.668, 0.389, 1.0))
+
+var compute_list = rd.compute_list_begin()
+
+rd.compute_list_bind_compute_pipeline(compute_list, copy_pipeline)
+rd.compute_list_bind_uniform_set(compute_list, post_uniform.cache(copy_shader), 0)
+rd.compute_list_dispatch(compute_list, 45, 23, 1)
+rd.compute_list_end()
+
+rd.draw_command_end_label()
+```
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/bloom_final.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The resulting bloom effect</figcaption>
+</figure>
+
+---
+
+From here you can extend the scene further. I took the liberty of adding lights (no shadow casting though) and extra effects such as chromatic aberration, UV warping, and a subtle vignette:
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/bloom_compose.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The final result with some post-processing</figcaption>
+</figure>

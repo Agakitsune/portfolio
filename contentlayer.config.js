@@ -4,6 +4,41 @@ import rehypePrettyCode from "rehype-pretty-code";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 
+function rehypeCollapseSections() {
+  return (tree) => {
+    const nodes = tree.children;
+    let i = 0;
+    while (i < nodes.length) {
+      if (nodes[i].type === "element" && nodes[i].tagName === "h3") {
+        let j = i + 1;
+        while (j < nodes.length) {
+          const next = nodes[j];
+          if (next.type === "element" && /^h[123]$/.test(next.tagName)) break;
+          j++;
+        }
+        // Extract the heading + body nodes in one splice (no copies)
+        const [heading, ...body] = nodes.splice(i, j - i);
+        const details = {
+          type: "element",
+          tagName: "details",
+          properties: { open: true },
+          children: [
+            {
+              type: "element",
+              tagName: "summary",
+              properties: {},
+              children: [heading],
+            },
+            ...body,
+          ],
+        };
+        nodes.splice(i, 0, details);
+      }
+      i++;
+    }
+  };
+}
+
 /** @type {import('contentlayer/source-files').ComputedFields} */
 const computedFields = {
 	path: {
@@ -41,6 +76,10 @@ export const Project = defineDocumentType(() => ({
 		},
 		repository: {
 			type: "string",
+		},
+		tags: {
+			type: "list",
+			of: { type: "string" },
 		},
 	},
 	computedFields,
@@ -97,6 +136,7 @@ export default makeSource({
 					},
 				},
 			],
+			rehypeCollapseSections,
 		],
 	},
 });

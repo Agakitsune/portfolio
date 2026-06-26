@@ -1,0 +1,336 @@
+---
+title: "Hi-Fi RUSH Stencil experiment"
+description: An experimentation that I made after seeing a presentation of Hi-Fi RUSH
+published: true
+tags:
+  - Graphics
+  - Godot
+
+---
+
+When looking for a video to watch while eating, I found this presentation of the [Rendering process in Hi-Fi Rush](https://www.youtube.com/watch?v=gdBACyIOCtc) and, even though I hadn't played the game at the time (I have now — very good game), one technique they presented stuck with me:
+
+![](/images/hifirush.png)
+
+This technique shows how they chose to apply their toon post-process: use a **bounding box** to pass down parameters to the contained geometry and apply a stylized post-process with it.
+
+Their implementation uses the **Depth Buffer** to determine the crossing geometry and adjust its parameters. Even though they didn't explain exactly how they did it, I wanted to recreate it in Godot (to a certain extent — Godot is a **Forward+** renderer only).
+
+---
+
+### The Wind Waker Light Effect
+
+When Godot 4.5 came out, I came across an example that reproduces the light effect from Wind Waker:
+<video src="/videos/stencil_light.webm" autoPlay loop />
+
+You may wonder what the link between Hi-Fi Rush and Wind Waker is. There isn't one, but what is interesting is how this user managed to achieve the effect.
+
+When porting the example into an empty project and playing around with it, we can see that it's just a mesh:
+![A sphere mesh](/images/stencil_mine.png)
+
+---
+
+*But how can you use a mesh to make this?*
+
+By using the **Stencil Buffer** and a **multi-pass material** (rendering the mesh twice with different materials), we can achieve this. The goal is to apply "light" wherever the mesh intersects other geometry.
+
+We don't want to check if our mesh intersects every piece of geometry in the level (even with an optimisation structure like an octree), so we need to be smart about it.
+
+The core problem is detecting when geometry intersects. To understand that, we first need to understand what happens when two pieces of geometry overlap.
+
+If you've been studying OpenGL on your own or following [learnopengl.com](https://learnopengl.com/), you might have encountered an issue like this:
+![A failing depth geometry](/images/stencil_depth_fail.png)
+
+Even though the second cube is behind the first one, it gets displayed "above" it, and the plane gets erased. This is because the **fragment shader** just outputs colors and has no knowledge of previous draw calls.
+
+One solution is to order your meshes from furthest to closest, but this breaks down when geometry intersects — one mesh will always appear above the other. To solve this, the concept of the **Depth Buffer** was introduced.
+
+The **Depth Buffer**, as its name suggests, is a buffer that stores depth values for the sole purpose of determining whether geometry was already drawn at a given pixel. When geometry is rasterized, each **fragment** interpolates its depth from the **vertex shader**'s projection output. Each fragment is then tested against the Depth Buffer with a configurable operation — the most common being `GREATER` (at least with Vulkan) — meaning:
+
+If the current fragment's depth is *greater than* the stored depth, process the fragment.
+
+So what does this tell us? With the Depth Buffer, intersecting geometry gets culled and is no longer processed by the fragment shader — meaning that if the **Depth Test** *fails*, the geometry is intersecting.
+
+*But what is a **Stencil Buffer**?* The Stencil Buffer is another buffer, generally stored alongside the Depth Buffer, that enables additional per-fragment testing — known as a **Stencil Test**. Unlike the Depth Buffer which stores floating-point values, the Stencil Buffer stores unsigned byte values from `0` to `255`, with many more available operations.
+
+What does the Stencil Buffer offer? For starters, you can choose different tests and operations for front-facing and back-facing surfaces, though in Godot the front and back states are shared.
+
+There are a few key parameters. First, the **Stencil Reference** — the value we test against and use in certain operations. Then the **Compare Mask** and **Write Mask**: the Compare Mask masks the reference before the test, the Write Mask masks it after. Finally, the **compare operator** defines the test:
+
+| Operation          | Description               |
+|:-------------------|:--------------------------|
+| `NEVER`            | Always fails              |
+| `LESS`             | `reference < stencil`     |
+| `EQUAL`            | `reference == stencil`    |
+| `LESS_OR_EQUAL`    | `reference <= stencil`    |
+| `GREATER`          | `reference > stencil`     |
+| `NOT_EQUAL`        | `reference != stencil`    |
+| `GREATER_OR_EQUAL` | `reference >= stencil`    |
+| `ALWAYS`           | Always passes             |
+
+The last parameters are the **Stencil Operations**. There are three of them:
+- When the Stencil Test fails
+- When the Stencil Test passes
+- When the Depth Test fails
+
+Each is set to one of the following operations:
+
+| Operation                  | Description                                           |
+|:---------------------------|:------------------------------------------------------|
+| `KEEP`                     | Keep the current stencil value                        |
+| `ZERO`                     | Set the stencil value to 0                            |
+| `REPLACE`                  | Replace the stencil value with the reference value    |
+| `INCREMENT_AND_CLAMP`      | Increment and clamp to the maximum value              |
+| `DECREMENT_AND_CLAMP`      | Decrement and clamp to 0                              |
+| `INVERT`                   | Bitwise invert the stencil value                      |
+| `INCREMENT_AND_WRAP`       | Increment and wrap back to 0 if it exceeds the max    |
+| `DECREMENT_AND_WRAP`       | Decrement and wrap back to the max if it goes below 0 |
+
+What interests us most is the **Depth Fail** operation: when the Depth Test fails, we can write a value into the Stencil Buffer, giving us a buffer that marks exactly where geometry intersects.
+
+So we can set up our first shader like this:
+
+```gdshader
+shader_type spatial;
+render_mode depth_draw_never, unshaded;
+stencil_mode write_depth_fail, 2;
+```
+
+In `render_mode` we have:
+- `depth_draw_never` — we want to test against the Depth Buffer but not modify it, so we can see through the object
+- `unshaded` — if you want to display the light mesh as I did, this avoids unwanted shadows on it
+
+And we set `stencil_mode` to `write_depth_fail`, writing the reference to the Stencil Buffer whenever the Depth Test fails.
+
+For this first pass, the Stencil Buffer gets filled with the front faces that lie below the plane.
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_step1.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The white pixels below are the fragments that failed the depth test and were written to the Stencil Buffer</figcaption>
+</figure>
+
+The Stencil Buffer is not yet marked where the light should appear — it's only used to control the next step:
+
+```gdshader
+shader_type spatial;
+render_mode depth_draw_never, unshaded, cull_front, depth_test_inverted;
+stencil_mode read, compare_not_equal, 2;
+
+uniform vec4 color : source_color = vec4(1, 1, 1, 1);
+
+void fragment() {
+	ALBEDO = color.rgb;
+	ALPHA *= color.a;
+}
+```
+
+We still have `depth_draw_never` and `unshaded` in our `render_mode`, plus two new parameters:
+- `cull_front` — **face culling** discards fragments facing the wrong way. Normally we cull backfaces since they're invisible, but here we invert it to render the inside of the mesh.
+- `depth_test_inverted` — the default Depth Test operator is `GREATER`, where greater values are closer to the camera. We invert this to select fragments that appear *behind* other surfaces.
+
+*Note: the original shader also had `blend_mul`, but I found it made the color parameter difficult to work with, so I removed it.*
+
+The Stencil Test is set to read-only and passes only when the value is not `2`.
+
+With the inverted Depth Test, we only see what's behind the plane — the whole hemisphere below it. By inserting the Stencil Test we get what we want:
+
+<div className="grid grid-cols-2 gap-4">
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_without.png" alt="" />
+    <figcaption className="text-center text-sm text-zinc-500 mt-1">Without the Stencil Test</figcaption>
+  </figure>
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_final.png" alt="" />
+    <figcaption className="text-center text-sm text-zinc-500 mt-1">With the Stencil Test</figcaption>
+  </figure>
+</div>
+
+---
+
+### Back to Hi-Fi RUSH
+
+Now that we have all of this, you may wonder how to apply it to the Hi-Fi RUSH technique.
+
+*My inspiration for this effect doesn't really come from the Wind Waker example, and I can no longer find the original site — but the goal was the same: making lights from a volume.*
+
+We can use the same tricks — **Stencil Buffer**, front-face culling, and **Depth Test** — to achieve a similar effect.
+![](/images/stencil.png)
+
+---
+
+The goal is simple: if any geometry intersects the <Ref>Bounding Box</Ref>, render it with a different shader. In practice, we render the geometry with the standard shader first, then render it again with a toon shader controlled by a Stencil Test.
+
+We'll split this into 2 parts, since there are 2 components:
+- The Bounding Box
+- The outside geometry
+
+Starting with the <Ref>Bounding Box</Ref>, we need to detect when geometry is inside it. First, we fill the Depth Buffer with the scene geometry so we can test the cube against it.
+
+We render the box with this shader:
+
+```gdshader
+shader_type spatial;
+render_mode cull_front, depth_test_inverted, depth_draw_never, unshaded;
+stencil_mode write, 1;
+```
+
+This marks any geometry that *could be* inside the box: geometry inside the box is closer than the backfaces, and the inverted Depth Test catches this since it only passes when a fragment is behind something else.
+
+<div className="grid grid-cols-2 gap-4">
+  <figure>
+    <img className="w-full" src="/images/stencil_step1_a.png" alt="" />
+    <figcaption className="text-center text-sm text-zinc-500 mt-1">We can see the plane, the sphere and the cube...</figcaption>
+  </figure>
+  <figure>
+    <img className="w-full" src="/images/stencil_step1_b.png" alt="" />
+    <figcaption className="text-center text-sm text-zinc-500 mt-1">... and the resulting Stencil Buffer, grey values are 1</figcaption>
+  </figure>
+</div>
+
+Next, a second pass:
+
+```gdshader
+shader_type spatial;
+render_mode cull_back, depth_test_default, depth_draw_never, unshaded;
+stencil_mode write_depth_fail, 2;
+```
+
+The `stencil_mode` does the heavy work here. We write `2` when the Depth Test fails: with front faces and a standard Depth Test, the only reason the test would fail is that closer geometry exists — meaning that geometry is *outside* the box, so we write `2` there. Any geometry behind the front face keeps the value `1`, *if* it was also in front of the backfaces. This is exactly what our Stencil Test will check: values of `1` mark fragments between the front and back faces, i.e. inside the mesh.
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_step2_a.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">White values are 2 — the area below the plane has been clipped, and so has the other half of the sphere</figcaption>
+</figure>
+
+---
+
+For the geometry, we first need a standard **opaque** material for the sphere. **This material must not be transparent, as transparent materials do not write to the Depth Buffer.**
+
+Next, a shader that tests whether the stencil value is `1`:
+```gdshader
+shader_type spatial;
+render_mode depth_draw_always, diffuse_toon, specular_toon;
+stencil_mode read, compare_equal, 1;
+
+void fragment() {
+	ALPHA = 1.0; // This is important
+}
+```
+
+Note that `ALPHA = 1.0;` is required here: reading from the Stencil Buffer in Godot requires the material to be in the **Transparent pass**. Setting `ALPHA` to `1.0` forces the Engine to place it there.
+
+There is one more thing to address: render order. For this we use the **Render Priority** of the materials.
+
+In the editor, looking at a material, you might have seen this property without really knowing what it does or even using it.
+![](/images/stencil_editor.png)
+
+**Render Priority** controls the order in which materials render. A higher priority makes a material render after lower-priority ones — a material with priority `1` renders after one at priority `0`.
+
+> **Render Priority** does not affect the rendering order between **Transparent** and **Opaque** materials — Transparent materials are **always** rendered after Opaque ones.
+
+This matters because we want our box to render before the meshes. Since our box is in the Transparent pass (to make it see-through), opaque meshes always render before it — which is actually fine, as we need the Depth Buffer to be filled first.
+
+> Godot uses a **Depth Pre-Pass**, which renders the scene without processing colors. This optimisation reduces **Overdraw** by discarding fragments that wouldn't be visible anyway, regardless of draw order.
+
+The problem lies with the toon materials. If they remain at priority `0`, you may see rendering artifacts.
+
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_problem.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Doesn't look right...</figcaption>
+</figure>
+
+The issue is that our materials are being rendered in an order chosen by the Engine, not by us.
+
+This is where **Render Priority** comes in. Set the back pass to a lower priority (e.g., `-2`) and the front pass to a higher priority — but still lower than `0`. The back face must have a lower priority than the front face to ensure it renders first.
+
+And that's it! When geometry intersects the box, the toon shader renders instead of the normal one. Here is the full toon shader:
+
+```gdshader
+shader_type spatial;
+render_mode depth_draw_always, diffuse_toon, specular_toon;
+stencil_mode read, compare_equal, 1;
+
+uniform vec3 color: source_color;
+uniform sampler2D color_gradient: source_color;
+uniform sampler2D fresnel_gradient: source_color;
+
+float fresnel(float amount, vec3 normal, vec3 view) {
+	return pow((1.0 - clamp(dot(normalize(normal), normalize(view)), 0.0, 1.0)), amount);
+}
+
+void fragment() {
+	float fres = fresnel(4.0, NORMAL, VIEW);
+	
+	vec4 fres_color = texture(fresnel_gradient, vec2(fres, 0.0));
+	
+	ALBEDO = color + fres * fres_color.rgb;
+	ALPHA = 1.0;
+}
+
+void light() {
+	float d = clamp(dot(NORMAL, LIGHT), -0.9, 0.9);
+	float sample = clamp((d + 1.0) * ATTENUATION / 1.9, 0.05, 0.95);
+	vec4 shaded = texture(color_gradient, vec2(sample, 0.0));
+    DIFFUSE_LIGHT += clamp((shaded.rgb * LIGHT_COLOR), 0.0, 1.0);
+}
+```
+
+---
+
+### The Bad News
+
+Now let's look at one of the problems with this implementation. First off, I actually cheated a bit with the stencil — let me go back to the front face pass.
+
+```gdshader
+stencil_mode write_depth_fail, 2;
+```
+
+We saw earlier that there are many stencil operators, but Godot restricts them to just 3 modes:
+- `read`
+- `write`
+- `write_depth_fail`
+
+The mode we used sets the <Ref>Depth Fail Operator</Ref> to `REPLACE` and the <Ref>Compare Operator</Ref> to `ALWAYS` (though the compare doesn't matter much here). When using `write` or `write_depth_fail`, the <Ref>Compare Mask</Ref> is set to `0`, meaning the tested values are always `0`.\
+We also lose the ability to change the operator: `read` sets it to `KEEP`, while `write` and `write_depth_fail` set it to `REPLACE`. The reference I followed used the `INCREMENT` operator, which is why I set the reference to `2` — to mimic the incrementation.
+
+But this workaround has a cost. If you try to duplicate the box and move it, you might see something like this:
+<figure>
+  <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_bad.png" alt="" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The bad news</figcaption>
+</figure>
+
+Even though the sphere intersects the yellow box, the toon material doesn't apply, and the floor gets cut. This is because when the front pass of the red box renders, it overwrites the results from the yellow box. I have yet to find a solution to this without using the <Ref>Rendering Device</Ref>.
+
+Another issue is with objects that don't use materials — like <Ref>Decals</Ref> — since we can't know when they lie inside the box, we can't change how they render.
+
+There is also the matter of control. In Hi-Fi RUSH, they used a <Ref>Deferred renderer</Ref>, which allows passing down extra parameters like ambient color or ambient power — enabling things like changing shadow colors inside a building.
+
+Since Godot 4 uses a <Ref>Forward+</Ref> renderer, we don't have access to that level of control.
+
+Building the toon shader did let me explore some options, like using a gradient to color the shadows:
+<div className="grid grid-cols-2 gap-4">
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_result_a.png" alt="" />
+  </figure>
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_palette_a.png" alt="" />
+  </figure>
+</div>
+
+<div className="grid grid-cols-2 gap-4">
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_result_b.png" alt="" />
+  </figure>
+  <figure>
+    <img className="w-full rounded-md border border-zinc-200" src="/images/stencil_palette_b.png" alt="" />
+  </figure>
+</div>
+
+Although I find it quite difficult to control it.
+
+---
+
+There might be a better and more reliable way to replicate Hi-Fi RUSH's technique in Godot — with a more polished toon shader too — but this was still a fun problem to tackle.
+
+I hope this gave you some ideas for your own projects.
+

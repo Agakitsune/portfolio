@@ -1,0 +1,221 @@
+---
+title: "Alchemist"
+description: A minimal Vulkan based rendering engine focused on performance and flexibility
+published: true
+tags:
+  - Engine
+  - Vulkan
+  - C++
+
+---
+
+Alchemist is for now one of my greatest projects — quite big and ambitious, but it also means a lot to me.
+
+It is a Vulkan based rendering engine with performance, flexibility and simplicity in mind, with the possibility of becoming a full Game Engine in the future (probably not at Godot's level though).
+
+### How did I come up with Alchemist?
+
+Before getting to what you can do with it, some history about myself is needed.
+
+In my studying years, some of the projects we did were video games, but we didn't use a Game Engine like Unreal, Unity or even a framework like MonoGame — we had to work with libraries and build our own API, Animation Manager, Tilesets, Collisions, etc.
+
+The first library we worked with was CSFML. Even though it still does the heavy lifting of communicating with OpenGL to render, I had the freedom to make my own systems the way I wanted, and it was great to be the only one responsible for how an object was drawn on screen.
+
+During the year there would also be game jams — sometimes organised by the school only for students, sometimes external events where everyone was welcome. My first jams were made with a library built by a good friend of mine in Ruby. It wasn't the greatest, it still had a lot of holes and missing features, but it was still great to build on top of it and make something meaningful with it.
+
+Looking back at it, the greatest thing about this library was having **control** — I was the only one standing between the idea of the game and the rendering, ordering which sprites were rendered before others.
+
+In my second year, I kept using this library for some jams — made an R-type (or at least something that resembles one), puzzle games and so on. But something else was also coming: a Game Engine I had heard about was rising in popularity: Godot 4.
+
+Some students were using this engine and I decided to hop on board. The engine was great — light, fast to load (not like Unity) and working perfectly on Linux (even to this day I can't manage to make Unity run correctly on Linux without some artifacts, probably a skill issue on my part though).
+I started making some prototypes with it and did some jams with friends, but even if I was proficient with it, sometimes we knew what we wanted but didn't know how to achieve it in the engine. That's okay — we were learning — but we had to search for tutorials that were up to date (since most of them were for Godot 3) and lost a lot of time doing that. That wasn't really Godot's fault though.
+
+I have been working with Godot for about 3 years now, 2 of which I spent making my own game with friends as a final project, and one of the things that still bugs me to this day is the lack of **control**.
+
+You still have control over how meshes look with materials and all, but you can't choose which gets rendered first or how the data gets interpreted. Even with the arrival of Stencil support in [Godot 4.5](https://godotengine.org/releases/4.5/), the current implementation lacks operations — and when you want to read the buffer back for effects and all, the objects need to be in the transparent pass, even if they aren't transparent, only because you can't choose which gets rendered first.\
+The one thing Godot did to allow more creativity with the rendering pipeline was probably the [Godot 4.4 Compositor](https://docs.godotengine.org/en/4.4/tutorials/rendering/compositor.html) — an object that lets you access a low-level state of the rendering pipeline at certain points.\
+It's a great addition, but it was still incomplete to me, as it didn't give the control I searched and longed for.
+
+Even with my experiments with the RenderingServer and the low-level RenderingDevice, I wasn't satisfied. Yes, you can do pretty much anything with the RenderingDevice since it's just an abstraction over the Vulkan/D3D12/Metal API, but you can't interact with the native objects — you have to create shaders, meshes, pipelines and framebuffers yourself.\
+With a low-level API that wouldn't be a problem, but inside a Game Engine I already have all the tools to build levels faster, duplicate meshes, write simple shaders and use scripts.\
+Having to ditch all of that just to render one object before another for a stencil effect? I wasn't going to accept that. And so I set out to make a Game Engine that would satisfy this need: the need for **control**.
+
+One of my earliest "engines" was an ECS called *Alchemist* — you can still find it on my [GitHub](https://github.com/Agakitsune/Alchemist-ECS), though be warned the code is definitely not up to today's standards.
+This project was mostly inspired by flecs. In a world where you only have access to C, composition over inheritance is definitely something worth exploring. Even though I made some choices while building games with it that broke the idea of an ECS, it was something I was proud of.
+
+In my research of what makes a good ECS, I also stumbled upon something else: Data-Oriented Design. Even if it didn't really click at the time, it would come back in my 3rd year when I experienced C++ and the pitfall of putting metaprogramming everywhere, then waiting a long time for the project to compile.
+
+During those years I made some engine-related projects — some small, some ambitious, in C, C++ or Ruby — but all were abandoned. At the end of my 3rd year, struggling with Godot to make what I wanted, an idea came to mind: a game engine that would let people alter the rendering process however they wanted, with full control. And to honour another project, one name was perfect: Alchemist.
+
+And then two years went by without working on it X). Since I had to work on my final project, I didn't have much time to invest in this project, now that I have some time, I decided to finally start something, even if it's ugly code and 5k lines monolothic classes. I have been working on it for about a month, and even though the code today is really bad (please don't look at it), there is something.
+
+And that's Alchemist — for now a rendering engine with performance, flexibility and simplicity in mind, but maybe one day a full Game Engine. At least I hope so.
+
+### What you can do with it
+
+Not much, unfortunately. Since it is quite new there is definitely a lack of features, but you have access to some tools I've built:
+
+The first tab you see when running the project is the *Scene*:
+
+<figure>
+  <img src="/images/alchemist_scene_screen.png" alt="Alchemist scene screenshot" />
+</figure>
+
+This is where you can place your objects and transform them. You currently have two objects: Mesh Instances and Camera.
+
+- Mesh Instance:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_instance.png" alt="Alchemist scene Mesh Instance screenshot" />
+</figure>
+
+The `mesh` property lets you pick which mesh to render (we'll see later how to create meshes). The transformation property is self-explanatory.
+If your mesh is valid you should see it in the scene.
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_cube.png" alt="Alchemist scene Mesh Cube screenshot" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">We'll see why it is fully white later</figcaption>
+</figure>
+
+- Camera:
+
+<figure className="img-500">
+  <img src="/images/alchemist_camera.png" alt="Alchemist scene Camera screenshot" />
+</figure>
+
+The `fov`, `near` and `far` properties correspond to the usual settings of a perspective camera (there is no orthographic mode for now).
+The `active` property defines which camera renders to the screen.
+
+---
+
+To view your scene you can press this button or hit `F5`:
+
+<figure className="img-500">
+  <img src="/images/alchemist_play_button.png" alt="Alchemist play button screenshot" />
+</figure>
+
+A 720×720 window will open. If you are inside the mesh (which is likely if you didn't move it) you'll see a white screen. Note that this is not a separate process like Godot tends to use — editing the scene will also update the render. You can use the transformation property of the mesh to edit it, or use the transform tools:
+
+<figure className="img-500">
+  <img src="/images/alchemist_bar.png" alt="Alchemist transform tool bar screenshot" />
+</figure>
+
+- Move (`G`)
+- Rotate (`R`)
+- Scale (`S`)
+
+And change the coordinate space:
+- Global
+- Local
+
+This displays a Gizmo you can use to transform objects:
+
+<figure className="img-500">
+  <img src="/images/alchemist_gizmo.png" alt="Alchemist translate gizmo screenshot" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">The translate gizmo</figcaption>
+</figure>
+
+The other tab alongside the Scene is the **Mesh Editor**:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_editor.png" alt="Alchemist mesh editor screenshot" />
+</figure>
+
+There is a lot to cover here since it lets you create, import and edit meshes.
+
+First you can create and view all your meshes here:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_list.png" alt="Alchemist mesh list screenshot" />
+  <figcaption className="text-center text-sm text-zinc-500 mt-1">Note that only the selected meshes will be visible in the viewport</figcaption>
+</figure>
+
+When creating a new mesh, you have a choice:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_menu.png" alt="Alchemist mesh menu screenshot" />
+</figure>
+
+- Empty Mesh:
+A blank canvas — no input, no data, nothing.
+
+- Cube Mesh:
+A standard 1m cube with position and normal data, flat normals.
+
+<figure className="img-500">
+  <img src="/images/alchemist_cube.png" alt="Alchemist cube screenshot" />
+</figure>
+
+- Icosphere:
+If you've used Blender, you probably know what this is — position data only, since position can also be used as normals. When selected, it will ask for the subdivision level.
+
+<figure className="img-500">
+  <img src="/images/alchemist_ico.png" alt="Alchemist icosphere screenshot" />
+</figure>
+
+- UV Sphere:
+A UV Sphere. When selected, it will ask for the number of segments and rings.
+
+<figure className="img-500">
+  <img src="/images/alchemist_sphere.png" alt="Alchemist UV sphere screenshot" />
+</figure>
+
+- Load Model:
+Loads an OBJ or glTF model. Supports vertex and normal data only.
+
+When a mesh is selected, you can see which input it's using and access the surface data:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_data.png" alt="Alchemist mesh data screenshot" />
+</figure>
+
+Interacting with the input will open a new window:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_input.png" alt="Alchemist mesh input screenshot" />
+</figure>
+
+This shows how many attributes your mesh has and their formats.
+In this example the input is for the cube mesh — we can see position data and normal data. Note that all inputs have at least one attribute of type `R32G32B32_SFLOAT`. The `type` property is only used for data representation in the editor and in the shader.
+
+Next we have the surface data:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_surface.png" alt="Alchemist mesh surface screenshot" />
+</figure>
+
+`Vertex count` — the number of vertices in this surface\
+`Index count` — the number of indices in this surface
+
+`Attribute 0` — the raw position data, a list of Vector3\
+`Attribute 1` — the raw normal data, a list of Vector3\
+`Index` — the raw index data. Note that meshes are drawn using a Triangle List, so each face is a triangle.
+
+Next we have the Shader Editor:
+
+<figure className="img-500">
+  <img src="/images/alchemist_input_shader.png" alt="Alchemist shader editor screenshot" />
+</figure>
+
+This lets you change the shader of the mesh. Each attribute has a name based on its type followed by its location — for example, with the cube, the position data is accessed as `pos0` (position at location 0), and the normal as `norm1`.\
+To pass vertex data like normals down to the fragment shader, each attribute has a fragment counterpart — `fragNorm1` in this example.
+
+You also have access to some uniform data in the vertex shader (which you can also pass to the fragment shader by creating your own locations):
+
+- `model`: The model matrix
+- `view`: The view matrix
+- `inv_view`: The inverse view matrix
+- `proj`: The projection matrix
+- `inv_proj`: The inverse projection matrix
+- `normal`: The normal matrix
+- `time`: An accumulator of time
+
+Here is an example shader:
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_vert.png" alt="Alchemist vertex shader screenshot" />
+</figure>
+
+<figure className="img-500">
+  <img src="/images/alchemist_mesh_frag.png" alt="Alchemist fragment shader screenshot" />
+</figure>

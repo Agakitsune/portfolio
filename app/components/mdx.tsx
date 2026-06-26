@@ -8,6 +8,33 @@ function clsx(...args: any) {
 	return args.filter(Boolean).join(" ");
 }
 const components = {
+	New: ({ ...props }) => (
+		<strong
+			style={{
+				color: "#ce2d4f",
+				fontWeight: 700,
+				fontStyle: "normal",
+			}}
+			{...props}
+		/>
+	),
+	Ref: ({ ...props }) => (
+		<strong
+			style={{
+				color: "#f4f4f5",
+				fontWeight: 700,
+				fontStyle: "normal",
+				// textDecoration: "underline",
+				// textDecorationColor: "#ce2d4f",
+				// textDecorationStyle: "dotted",
+				// textUnderlineOffset: "3px",
+			}}
+			{...props}
+		/>
+	),
+	strong: ({ ...props }) => (
+		<strong style={{ color: "#ce2d4f", fontWeight: 700 }} {...props} />
+	),
 	h1: ({ className, ...props }) => (
 		<h1
 			className={clsx(
