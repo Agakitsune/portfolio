@@ -209,3 +209,13 @@
 
 .dark-prose .mdx .img-900 { max-width: 900px; margin-left: auto; margin-right: auto; }
 
+@media (max-width: 767px) {
+  .dark-prose .mdx img,
+  .dark-prose .mdx video {
+    max-width: 100%;
+  }
+  .dark-prose .mdx [class^="img-"] {
+    max-width: 100%;
+  }
+}
+

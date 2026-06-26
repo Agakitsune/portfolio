@@ -5,6 +5,7 @@ import { SiGithub, SiItchdotio } from "react-icons/si";
 import { FaEnvelope } from "react-icons/fa6";
 import { allProjects } from "contentlayer/generated";
 import { Mdx } from "./mdx";
+import { useIsMobile, useIsLandscapeMobile } from "@/util/screen";
 
 // ── Cards ────────────────────────────────────────────────────────────────────
 
@@ -309,8 +310,10 @@ function ContentDetail({ slug, onBack }: { slug: string; onBack: () => void }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function PanelTest() {
-  const pathname = usePathname();
-  const router   = useRouter();
+  const pathname  = usePathname();
+  const router    = useRouter();
+  const isMobile          = useIsMobile();
+  const isLandscapeMobile = useIsLandscapeMobile();
 
   const isOnLeft   = pathname?.startsWith("/left") ?? false;
   const activeSlug = pathname?.startsWith("/left/") ? pathname.slice("/left/".length) : null;
@@ -346,7 +349,7 @@ export default function PanelTest() {
 
   return (
     <>
-      {/* Detail panel — slides in from the left, takes the remaining 50vw */}
+      {/* Detail panel — slides in from the left */}
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -354,12 +357,13 @@ export default function PanelTest() {
           top: 0,
           left: 0,
           height: "100dvh",
-          width: isOnLeft ? "75vw" : "50vw",
+          width: isMobile ? (isLandscapeMobile ? (isOnLeft ? "55vw" : "40vw") : "100vw") : isOnLeft ? "75vw" : "50vw",
+          minWidth: isMobile ? undefined : isOnLeft ? 480 : 400,
           background: "rgba(25, 23, 23, 0.92)",
           backdropFilter: "blur(5px)",
           WebkitBackdropFilter: "blur(5px)",
-          borderRight: "1px solid rgba(206,45,79,0.3)",
-          zIndex: 49,
+          borderRight: isMobile ? "none" : "1px solid rgba(206,45,79,0.3)",
+          zIndex: 51,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
@@ -375,7 +379,7 @@ export default function PanelTest() {
             display: "flex",
             flexDirection: "column",
             alignItems: "flex-start",
-            padding: "3rem 3rem 6rem",
+            padding: isMobile ? "1.5rem 1.25rem 6rem" : "3rem 3rem 6rem",
             gap: "1.25rem",
             opacity: detailFading ? 0 : 1,
             transition: "opacity 0.18s ease-out",
@@ -398,11 +402,12 @@ export default function PanelTest() {
           top: 0,
           right: 0,
           height: "100dvh",
-          width: isOnLeft ? "25vw" : "50vw",
+          width: isMobile ? (isLandscapeMobile ? (isOnLeft ? "45vw" : "60vw") : "100vw") : isOnLeft ? "25vw" : "50vw",
+          minWidth: isOnLeft ? 280 : 400,
           background: "rgba(25, 23, 23, 0.92)",
           backdropFilter: "blur(5px)",
           WebkitBackdropFilter: "blur(5px)",
-          borderLeft: "1px solid #c22d4f",
+          borderLeft: isMobile ? "none" : "1px solid #c22d4f",
           zIndex: 50,
           display: "flex",
           flexDirection: "column",
@@ -422,7 +427,9 @@ export default function PanelTest() {
             // hold the about-mode width while ContentAbout is still visible so
             // text doesn't reflow during the panel width transition; snaps away
             // after the 180ms fade when visibleCategory switches to "left"
-            minWidth: visibleCategory === "about" ? "calc(50vw - 300px)" : 0,
+            minWidth: visibleCategory === "about" && !isMobile && !isLandscapeMobile
+              ? "calc(50vw - 300px)"
+              : 0,
           }}>
             <div
               className="panel-scroll"
@@ -447,8 +454,8 @@ export default function PanelTest() {
             </div>
           </div>
 
-          {/* Image banner — only on about, naturally clipped by the row height */}
-          {visibleCategory === "about" && <ImageBanner fading={fading} />}
+          {/* Image banner — only on about, hidden on all mobile */}
+          {visibleCategory === "about" && !isMobile && !isLandscapeMobile && <ImageBanner fading={fading} />}
         </div>
 
         {/* Full-width bottom button */}
