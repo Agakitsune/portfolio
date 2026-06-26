@@ -26,6 +26,12 @@ const inspire = [
     where: null,
     link: null,
   },
+  {
+    text: "I'm not a great programmer; I'm just a good programmer with great habits",
+    whom: "Kent Beck",
+    where: null,
+    link: null,
+  },
 ];
 
 export default function InspireText() {
