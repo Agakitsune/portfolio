@@ -12,6 +12,8 @@
     "@next/font": "^13.5.4",
     "@next/mdx": "^13.5.4",
     "@upstash/redis": "^1.23.3",
+    "@vercel/analytics": "^2.0.1",
+    "@vercel/speed-insights": "^2.0.0",
     "contentlayer": "^0.3.4",
     "framer-motion": "^10.16.4",
     "gl-matrix": "^3.4.4",

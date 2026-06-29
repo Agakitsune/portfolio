@@ -2,7 +2,9 @@ import "../global.css";
 import { Inter } from "next/font/google";
 import LocalFont from "@next/font/local";
 import { Metadata } from "next";
-import { Analytics } from "./components/analytics";
+// import { Analytics } from "./components/analytics";
+import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import PanelShell from "./components/panel-shell";
 
 export const metadata: Metadata = {
@@ -65,6 +67,7 @@ export default function RootLayout({
     <html lang="en" className={[inter.variable, calSans.variable].join(" ")}>
       <head>
         <Analytics />
+        <SpeedInsights />
       </head>
       <body
         className={process.env.NODE_ENV === "development" ? "debug-screens" : undefined}
